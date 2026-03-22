@@ -1,0 +1,96 @@
+seed: 1
+total_num_scenes: 36
+num_processes: 1
+num_eval_episodes: 1000
+cuda: true
+sim_gpu_id: 1
+log_interval: 10
+save_interval: 1
+dump_location: "./outputs/experiments/"
+experiment_id: "experiment_0"
+save_periodic: 50000
+visualize: 1
+environment: "habitat"
+env_frame_width: 480
+env_frame_height: 640
+frame_width: 120
+frame_height: 160
+max_episode_length: 1000
+task_config: "tasks/hm3d.yaml"
+text_goal_dataset: "/data/datasets/textnav/val/val_text.json.gz"
+split: "val"
+# split: "one_env_try"
+camera_height: 0.88
+hfov: 79
+min_depth: 0.00
+max_depth: 30.0
+success_dist: 1.0
+floor_thr: 50
+min_d: 1.5
+max_d: 100.0
+version: "v1"
+lr: 2.5e-5
+global_hidden_size: 256
+eps: 1.0e-5
+alpha: 0.99
+gamma: 0.99
+use_gae: false
+tau: 0.95
+entropy_coef: 0.001
+value_loss_coef: 0.5
+max_grad_norm: 0.5
+num_global_steps: 20
+ppo_epoch: 4
+num_mini_batch: 1
+clip_param: 0.2
+use_recurrent_global: 0
+num_local_steps: 40
+reward_coeff: 0.1
+intrinsic_rew_coeff: 0.02
+sem_pred_prob_thr: 0.50
+global_downscaling: 3
+vision_range: 100
+du_scale: 1
+cat_pred_threshold: 5.0
+map_pred_threshold: 1.0
+exp_pred_threshold: 1.0
+collision_threshold: 0.20
+kernel_size: 91
+low_dense: 8
+succeed_match_points: 200
+big_enough_f: 0.16666666666666666
+big_enough_thresh: 4
+turn_angle: 10 # 设置偏转角度，单位：度
+map_resolution: 0.005
+
+# map
+num_sem_categories: 16
+map_size_cm: 3600
+
+
+# LLM and VLM
+llm_model: "gpt-3.5-turbo"
+vlm_model: "gpt-3.5-turbo"
+api_key: "sk-IZiNQjv9P4AflJhRtRsOrhMr5mnoVKDMnid9y4C17jC0ZKMq"
+base_url: "http://35.220.164.252:3888/v1"
+
+# --- 建图水平校正（点云与轨迹整体旋转，使相机平面与水平面对齐）---
+apply_leveling_transform: true
+
+# --- BEV 形态学：障碍物膨胀迭代次数，0=关闭膨胀 ---
+obstacle_dilate_iterations: 0
+
+# --- 可开关扩展功能（默认关闭，不影响现有逻辑）---
+# 1. 目标投影安全性检查（两个独立开关）：
+#    - 计算与可视化：为 true 时会计算 g_st 投影与地面掩码校验，并在 episode 视频中可视化（不参与决策）
+#    - 参与决策：为 true 时在“前进”前若校验不通过则改为原地旋转
+safety_verification_compute_and_visualize: True
+safety_verification_use_in_decision: false
+# 2. 预触发与无缝切换：当机器人到当前 g_mid 的欧式距离 < pretrigger_epsilon_bev（BEV 像素）时，提前触发下一阶段高层推理，实现平滑过渡
+use_pretrigger: false
+pretrigger_epsilon_bev: 3.0
+# 3. 每 episode 结束后保存本 episode 汇总视频（每帧：观测、语义分割、BEV+每步位姿与短期/中期目标；可选安全性可视化）
+save_episode_video: true
+# 4. 探索历史场：始终计算并可视化；为 true 时参与融合决策（值越大越未探索），为 false 时传入全 1 不影响目标
+use_exploration_history_field: false
+exploration_history_sigma: 10

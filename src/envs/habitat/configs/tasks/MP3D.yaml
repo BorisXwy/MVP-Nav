@@ -1,0 +1,15 @@
+defaults:
+  - /habitat: habitat_config_base
+  # 任务类型保持 instance_imagenav (这是 ImageNav 的标准任务定义)
+  - /habitat/task: instance_imagenav
+  # 代理配置，保持使用带深度图的代理 (rgbds_agent) 或根据需求更改
+  - /habitat/simulator/agents@habitat.simulator.agents.main_agent: rgbds_agent
+  # 核心改动：指向 mp3d 的数据集定义
+  - /habitat/dataset/instance_imagenav: mp3d_v1
+  - _self_
+
+# 如果需要覆盖特定路径，可以在下方补充
+habitat:
+  dataset:
+    # 确保这里的 split 与你本地下载的数据一致
+    split: val

@@ -1,0 +1,58 @@
+# 1. 基础环境配置
+habitat:
+  type: Env  # 或者使用 RLEnv（用于强化学习）
+  seed: 100
+
+  environment:
+    max_episode_seconds: 1000
+    iterator_options:        # 报错提示缺少的就是这一行
+      shuffle: True
+
+  
+  # 2. 任务类定义 (这里决定了它是哪个类)
+  task:
+    type: ObjectNav-v1
+    success_distance: 0.1
+    admissible_success_distance: 0.2
+    # 测量指标：step 之后你可以通过 get_metrics() 获取这些
+    measurements:
+      - distance_to_goal
+      - success
+      - spl
+    # 动作空间：决定了 step(action) 里 action 可以传什么
+    actions:
+      move_forward:
+        type: MoveForwardAction
+      turn_left:
+        type: TurnLeftAction
+      turn_right:
+        type: TurnRightAction
+      stop:
+        type: StopAction
+
+  # 3. 模拟器设置 (渲染和物理)
+  simulator:
+    type: "HabitatSim-v0"
+    forward_step_size: 0.25 # 设置前进距离，单位：米
+    turn_angle: 10
+    agents:
+      main_agent:
+        sim_sensors:
+          rgb_sensor:
+            width: 640
+            height: 480
+            hfov: 79
+            position: [0, 1.31, 0]
+        height: 1.31
+        radius: 0.10
+    habitat_sim_v0:
+      gpu_device_id: 0
+      allow_sliding: True
+
+  # 4. 数据集路径 (用于 reset 切换场景和任务目标)
+  dataset:
+    type: ObjectNav-v1
+    split: train
+    data_path: "data/datasets/instance_imagenav/mp3d/v1/val/val.json.gz"
+    scenes_dir: "data/scene_datasets/mp3d/val"
+    content_scenes: ["*"]

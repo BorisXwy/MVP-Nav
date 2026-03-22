@@ -1,0 +1,220 @@
+"""
+Paper Algorithm 1: MVP-Nav recursive navigation loop.
+Order: Physical Perception -> (optional) VLM Reasoning -> MVM Planning -> Low-level Execution.
+"""
+
+from typing import Any, Dict, Optional, TextIO, Type
+
+import numpy as np
+
+from src.utils.my_tools import apply_transform
+
+from .physical_perception import run_physical_perception
+from .vlm_reasoning import run_vlm_reasoning
+from .mvm_planning import run_mvm_planning
+from .low_level_execution import (
+    run_until_midterm_reached,
+    execute_finding_or_judgement_turn,
+    plan_astar_to_midterm,
+    check_goal_match_in_obs,
+)
+from .episode_video import write_episode_video
+
+
+def run_episode(
+    episode_idx: int,
+    envs: Any,
+    agent: Any,
+    graph: Any,
+    MapClass: Type,
+    model_info: Dict[str, Any],
+    args: Any,
+    *,
+    use_vlm_per_stage: bool = False,
+    obs_save_folder: Optional[str] = None,
+    depth_save_folder: Optional[str] = None,
+    segment_save_folder: Optional[str] = None,
+    midterm_save_folder: Optional[str] = None,
+    shorterm_save_folder: Optional[str] = None,
+    result_file_handle: Optional[TextIO] = None,
+) -> tuple:
+    """
+    Run a single episode (paper Algorithm 1).
+
+    Per stage:
+      1. Physical Perception: update GSSL / map and fields
+      2. (optional) VLM Reasoning: GSSL scoring and NavMode
+      3. MVM Planning: update_stage + get_nav_mode_and_goal_via_fuse(loc_agent), select gmid via fuse_fields_and_extract_goal
+      4. Low-level Execution: A* + FMM to gmid or finding/judgement branch
+
+    Returns:
+        (success, step): whether this episode succeeded, total step count.
+    """
+    def log(s: str) -> None:
+        print(s)
+        if result_file_handle is not None:
+            result_file_handle.write(s + "\n")
+            result_file_handle.flush()
+
+    if obs_save_folder:
+        agent.obs_save_folder = obs_save_folder
+    if depth_save_folder:
+        agent.depth_save_folder = depth_save_folder
+    if segment_save_folder:
+        agent.segment_save_folder = segment_save_folder
+    if shorterm_save_folder:
+        agent.shorterm_save_folder = shorterm_save_folder
+    if midterm_save_folder:
+        args.midterm_save_folder = midterm_save_folder
+
+    agent.track_main = graph.track_main
+    agent.track_sub = graph.track_sub
+
+    agent_input = {
+        "bev": None,
+        "pose": None,
+        "midterm_goal": None,
+        "obs": None,
+        "wait": None,
+        "planned_path": None,
+        "bev_step": None,
+    }
+    if getattr(args, "save_episode_video", False):
+        agent_input["_episode_video_frames"] = []
+
+    turn_round = int(360 / args.turn_angle)
+    step = 0
+    # Initial 360° scan
+    for s in range(turn_round + 1):
+        agent.step_count = step
+        obs, done, infos = agent.control_step(3)
+        agent_input["obs"] = obs
+        step += 1
+    step -= 1
+
+    stage = 0
+    set2 = 0
+    set1 = 0
+    current_step = step
+    success = False
+    # Max steps per episode (default 200, overridable by args.max_episode_steps)
+    max_steps = getattr(args, "max_episode_steps", 200) or 200
+    map_inst = None
+
+    # Paper Algorithm 1: strict per-stage order, no pre-trigger
+    succeed_match_points = int(getattr(args, "succeed_match_points", 200))
+
+    while step < max_steps:
+        log(f"\n--- stage: {stage} ---")
+
+        # ----- 1. Physical Perception -----
+        loc_agent = envs.get_sim_location()
+        map_inst, map_info = run_physical_perception(
+            MapClass, set2, set1, current_step, stage, model_info, args, agent, loc_agent
+        )
+
+        # ----- 2. Graph state update (global objects, safety/explore fields) -----
+        graph.update_stage(map_info)
+
+        # ----- 3. (optional) VLM Reasoning -----
+        if use_vlm_per_stage and agent_input.get("obs") is not None:
+            try:
+                current_img = agent_input["obs"][-1] if isinstance(agent_input["obs"], list) else agent_input["obs"]
+                if hasattr(current_img, "numpy"):
+                    current_img = current_img.cpu().numpy().transpose(1, 2, 0)
+                goal_img = getattr(envs, "instance_imagegoal", None)
+                if goal_img is not None and hasattr(goal_img, "__array__"):
+                    goal_img = getattr(goal_img, "__array__", lambda: goal_img)()
+                run_vlm_reasoning(graph, loc_agent, current_img, goal_img)
+            except Exception as e:
+                log(f"VLM per stage skip: {e}")
+
+        # ----- 4. MVM Planning (fuse_fields_and_extract_goal) -----
+        nav_mode, midterm_goal = run_mvm_planning(graph, loc_agent, vis=True)
+        stage += 1
+
+        agent_input["bev"] = map_inst.bev
+        agent_input["pose"] = apply_transform(envs.get_sim_location(), map_inst.transform_sim2bev)
+        agent_input["bev_step"] = map_inst.bev_step
+        agent_input["_video_nav_mode"] = nav_mode
+        log(nav_mode)
+
+        # ----- 5. A* path for explore (safety field as costmap to avoid walls) -----
+        if nav_mode == "explore" and midterm_goal is not None:
+            goal_pose = midterm_goal["pose"]
+            pose_xy = (int(agent_input["pose"][0]), int(agent_input["pose"][1]))
+            save_path = f"{midterm_save_folder}/stage_{stage}.png" if midterm_save_folder else None
+            safety_field = getattr(map_inst, "stage_space_safety_field", None)
+            planned_path = plan_astar_to_midterm(
+                map_inst.bev, pose_xy, goal_pose, save_path, safety_field=safety_field
+            )
+            agent_input["planned_path"] = planned_path
+
+            # If A* fails (start/goal in obstacle or no path), switch to recognition to rebuild map
+            if planned_path is None or len(planned_path) == 0:
+                log("A* planning failed, switching to recognition mode to rebuild map.")
+                nav_mode = "recognition"
+                midterm_goal = None
+
+        # ----- 6. Low-level Execution (paper-aligned) -----
+        if nav_mode in ["finding", "judgement", "recognition"]:
+            step_delta = execute_finding_or_judgement_turn(
+                agent, envs, map_inst, agent_input, turn_round, step
+            )
+            step += step_delta
+            # Paper: after rotation in Judgement, decide arrival by goal-vs-observation match
+            if nav_mode == "judgement":
+                goal_img = getattr(envs, "instance_imagegoal", None)
+                if goal_img is not None:
+                    success = check_goal_match_in_obs(
+                        model_info,
+                        agent_input.get("obs"),
+                        goal_img,
+                        succeed_match_points,
+                    )
+                    if success:
+                        log("episode success (goal match >= threshold)")
+                        break
+        elif nav_mode == "explore" and midterm_goal is not None:
+            step_delta, done = run_until_midterm_reached(
+                agent,
+                envs,
+                map_inst,
+                agent_input,
+                midterm_goal,
+                args,
+                step,
+            )
+            step += step_delta
+            if done:
+                break
+
+        set2, set1, current_step = set1, current_step, step
+
+    # ----- Episode end: save top-down trajectory -----
+    # envs is InstanceImageGoal_Env with NavMesh-based top-down map and trajectory cache.
+    # Write trajectory to this episode dir (same episode_x as images).
+    obs_dir = getattr(agent, "obs_save_folder", None)
+    episode_dir = None
+    if obs_dir is not None:
+        # obs_dir is like ".../episode_k/saved_images"; parent is episode root
+        import os
+        episode_dir = os.path.dirname(obs_dir)
+
+    if hasattr(envs, "save_topdown_traj") and episode_dir:
+        try:
+            envs.save_topdown_traj(episode_dir)
+        except Exception as e:
+            log(f"save_topdown_traj failed: {e}")
+
+    if getattr(args, "save_episode_video", False) and episode_dir:
+        frames = agent_input.get("_episode_video_frames")
+        if frames:
+            try:
+                video_path = os.path.join(episode_dir, "episode_video.mp4")
+                write_episode_video(frames, video_path, fps=5.0)
+                log(f"Episode video saved: {video_path}")
+            except Exception as e:
+                log(f"save_episode_video failed: {e}")
+
+    return success, step

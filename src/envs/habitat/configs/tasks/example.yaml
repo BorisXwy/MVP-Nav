@@ -1,0 +1,190 @@
+habitat:
+  seed: 100
+  env_task: "GymHabitatEnv"
+  env_task_gym_dependencies: []
+  env_task_gym_id: ""
+
+  # --- 环境迭代与终止控制 ---
+  environment:
+    max_episode_steps: 500
+    max_episode_seconds: 10000000
+    iterator_options:
+      cycle: True
+      shuffle: True
+      group_by_scene: True
+      num_episode_sample: -1
+      max_scene_repeat_episodes: -1
+      max_scene_repeat_steps: 10000
+      step_repetition_range: 0.2
+
+  # --- 模拟器设置 (基于 Habitat-Sim) ---
+  simulator:
+    type: "Sim-v0"
+    action_space_config: "v0"
+    action_space_config_arguments: {}
+    forward_step_size: 0.25
+    create_renderer: False
+    requires_textures: True
+    auto_sleep: False
+    step_physics: True
+    concur_render: False
+    needs_markers: True
+    update_robot: True
+    scene: "data/scene_datasets/habitat-test-scenes/van-gogh-room.glb"
+    scene_dataset: "default"
+    additional_object_paths: []
+    seed: "${habitat.seed}"
+    turn_angle: 10
+    tilt_angle: 15
+    default_agent_id: 0
+    debug_render: False
+    debug_render_robot: False
+    kinematic_mode: False
+    debug_render_goal: True
+    robot_joint_start_noise: 0.0
+    ctrl_freq: 120.0
+    ac_freq_ratio: 4
+    load_objs: False
+    hold_thresh: 0.15
+    grasp_impulse: 10000.0
+    
+    # 智能体与传感器配置
+    agents:
+      main_agent:
+        height: 1.5
+        radius: 0.1
+        sim_sensors:
+          rgb_sensor:
+            type: "HabitatSimRGBSensor"
+            height: 256
+            width: 256
+            position: [0.0, 1.25, 0.0]
+            orientation: [0.0, 0.0, 0.0]
+            hfov: 90
+            sensor_subtype: "PINHOLE"
+            noise_model: "None"
+            noise_model_kwargs: {}
+          depth_sensor:
+            type: "HabitatSimDepthSensor"
+            height: 256
+            width: 256
+            position: [0.0, 1.25, 0.0]
+            orientation: [0.0, 0.0, 0.0]
+            hfov: 90
+            sensor_subtype: "PINHOLE"
+            noise_model: "None"
+            noise_model_kwargs: {}
+            min_depth: 0.0
+            max_depth: 10.0
+            normalize_depth: True
+        is_set_start_state: False
+        start_position: [0.0, 0.0, 0.0]
+        start_rotation: [0.0, 0.0, 0.0, 1.0]
+        joint_start_noise: 0.1
+        robot_urdf: "data/robots/hab_fetch/robots/hab_fetch.urdf"
+        robot_type: "FetchRobot"
+        ik_arm_urdf: "data/robots/hab_fetch/robots/fetch_onlyarm.urdf"
+    
+    agents_order: ["main_agent"]
+    
+    habitat_sim_v0:
+      gpu_device_id: 0
+      gpu_gpu: False
+      allow_sliding: True
+      frustum_culling: True
+      enable_physics: False
+      physics_config_file: "./data/default.physics_config.json"
+      leave_context_with_background_renderer: False
+      enable_gfx_replay_save: False
+    ep_info: None
+
+  # --- 任务逻辑与奖励函数 ---
+  task:
+    type: "Nav-v0"
+    reward_measure: "distance_to_goal_reward"
+    success_measure: "spl"
+    success_reward: 2.5
+    slack_reward: -0.01
+    end_on_success: True
+    
+    # 任务级传感器 (如 GPS, Compass)
+    lab_sensors:
+      pointgoal_with_gps_compass_sensor:
+        type: "PointGoalWithGPSCompassSensor"
+        goal_format: "POLAR"
+        dimensionality: 2
+    
+    # 测量指标配置 (用于评估和奖励计算)
+    measurements:
+      distance_to_goal:
+        type: "DistanceToGoal"
+        distance_to: "POINT"
+      success:
+        type: "Success"
+        success_distance: 0.2
+      spl:
+        type: "SPL"
+      distance_to_goal_reward:
+        type: "DistanceToGoalReward"
+    
+    goal_sensor_uuid: "pointgoal_with_gps_compass"
+    count_obj_collisions: True
+    settle_steps: 5
+    constraint_violation_ends_episode: True
+    constraint_violation_drops_object: False
+    force_regenerate: False
+    should_save_to_cache: False
+    must_look_at_targ: True
+    object_in_hand_sample_prob: 0.167
+    min_start_distance: 3.0
+    render_target: True
+    physics_stability_steps: 1
+    num_spawn_attempts: 200
+    spawn_max_dists_to_obj: 2.0
+    base_angle_noise: 0.523599
+    ee_sample_factor: 0.2
+    ee_exclude_region: 0.0
+    base_noise: 0.05
+    spawn_region_scale: 0.2
+    joint_max_impulse: -1.0
+    desired_resting_position: [0.5, 0.0, 1.0]
+    use_marker_t: True
+    cache_robot_init: False
+    success_state: 0.0
+    easy_init: False
+    should_enforce_target_within_reach: False
+    task_spec_base_path: "habitat/task/rearrange/pddl/"
+    task_spec: ""
+    pddl_domain_def: "replica_cad"
+    obj_succ_thresh: 0.3
+    enable_safe_drop: False
+    art_succ_thresh: 0.15
+    robot_at_thresh: 2.0
+    filter_nav_to_tasks: []
+    
+    # 定义动作集
+    actions:
+      stop:
+        type: "StopAction"
+      move_forward:
+        type: "MoveForwardAction"
+      turn_left:
+        type: "TurnLeftAction"
+      turn_right:
+        type: "TurnRightAction"
+
+  # --- 数据集配置 ---
+  dataset:
+    type: "PointNav-v1"
+    split: "train"
+    scenes_dir: "data/scene_datasets"
+    content_scenes: ["*"]
+    data_path: "data/datasets/pointnav/habitat-test-scenes/v1/{split}/{split}.json.gz"
+
+  # --- Gym 适配层 ---
+  gym:
+    auto_name: ""
+    obs_keys: None
+    action_keys: None
+    achieved_goal_keys: []
+    desired_goal_keys: []
