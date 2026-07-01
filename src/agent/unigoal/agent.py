@@ -180,6 +180,8 @@ class UniGoal_Agent():
             self.instance_imagegoal = self.envs.instance_imagegoal
         elif self.args.goal_type == 'text':
             self.text_goal = self.envs.text_goal
+        elif self.args.goal_type == 'object':
+            self.object_goal = getattr(self.envs, "object_goal", getattr(self.envs, "goal_name", None))
         if args.environment == 'habitat':
             idx = self.get_goal_cat_id()
             if idx is not None:
@@ -524,6 +526,16 @@ class UniGoal_Agent():
                 except:
                     pass
             return 0
+        elif self.args.goal_type == 'object':
+            goal_name = getattr(self, "object_goal", None)
+            if goal_name is None:
+                return None
+            normalized_goal_name = {
+                "couch": "sofa",
+                "potted plant": "plant",
+                "tv": "tv_monitor",
+            }.get(goal_name, goal_name)
+            return getattr(self.envs, "name2index", {}).get(normalized_goal_name)
                 
 
     def segment_single_image(self, image_tensor: torch.Tensor) -> np.ndarray:

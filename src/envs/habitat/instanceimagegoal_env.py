@@ -1,14 +1,12 @@
 import json
 import gzip
-import gym
 import numpy as np
 import quaternion
 import habitat
 import os
 import torch
-import numpy as np
-import json
 from PIL import Image
+from pathlib import Path
 
 from configs.categories import name2index
 from src.utils.fmm.pose_utils import get_l2_distance, get_rel_pose_change
@@ -25,8 +23,11 @@ class InstanceImageGoal_Env(habitat.RLEnv):
         self.split = config_env.habitat.dataset.split
         self.device = torch.device("cuda",  \
             int(config_env.habitat.simulator.habitat_sim_v0.gpu_device_id))
-        self.episodes_dir = os.path.join("data/datasets/instance_imagenav/hm3d/v3", self.split)
+        self.nav_task = getattr(args, "nav_task", "instance_imagenav")
+        default_episodes_dir = os.path.join("data/datasets/instance_imagenav/hm3d/v3", self.split)
+        self.episodes_dir = getattr(args, "instance_imagenav_dataset_dir", default_episodes_dir)
         self.episode_no = -1
+        self._episode_cache = {}
 
         # Scene info
         self.last_scene_path = None
@@ -63,38 +64,46 @@ class InstanceImageGoal_Env(habitat.RLEnv):
             self.average_acc = 0
 
     def update_after_reset(self):
-        args = self.args
-
         self.scene_path = self.habitat_env.sim.config.sim_cfg.scene_id
         scene_name = self.scene_path.split("/")[-1].split(".")[0]
 
-        if self.scene_path != self.last_scene_path:
-            episodes_file = self.episodes_dir + \
-                "/content/{}.json.gz".format(scene_name)
+        if self.nav_task == "instance_imagenav":
+            if self.scene_path != self.last_scene_path:
+                episodes_file = Path(self.episodes_dir) / "content" / f"{scene_name}.json.gz"
+                if episodes_file not in self._episode_cache:
+                    print(f"Loading episodes from: {episodes_file}")
+                    with gzip.open(episodes_file, "rt", encoding="utf-8") as f:
+                        self._episode_cache[episodes_file] = json.load(f)["episodes"]
 
-            print("Loading episodes from: {}".format(episodes_file))
-            with gzip.open(episodes_file, 'r') as f:
-                self.eps_data = json.loads(
-                    f.read().decode('utf-8'))["episodes"]
+                self.eps_data = self._episode_cache[episodes_file]
+                self.eps_data_idx = 0
+                self.last_scene_path = self.scene_path
 
-            self.eps_data_idx = 0
-            self.last_scene_path = self.scene_path
-
-        # Load episode info
-        episode = self.eps_data[self.eps_data_idx]
-        self.eps_data_idx += 1
-        self.eps_data_idx = self.eps_data_idx % len(self.eps_data)
-
-        self.episode_geo_distance = episode["info"]["geodesic_distance"]
-        self.episode_euc_distance = episode["info"]["euclidean_distance"]
-
-        goal_name = episode["object_category"]
-        goal_idx = episode["goal_object_id"]
+            episode = self.eps_data[self.eps_data_idx]
+            self.eps_data_idx = (self.eps_data_idx + 1) % len(self.eps_data)
+            self.episode_geo_distance = episode.get("info", {}).get("geodesic_distance", 0.0)
+            self.episode_euc_distance = episode.get("info", {}).get("euclidean_distance", 0.0)
+            goal_name = episode["object_category"]
+        else:
+            episode = self.habitat_env.current_episode
+            self.episode_geo_distance = getattr(episode, "geodesic_distance", 0.0) or 0.0
+            self.episode_euc_distance = 0.0
+            goal_name = getattr(episode, "object_category", None)
+            if goal_name is None and getattr(episode, "object_category_name", None) is not None:
+                goal_name = episode.object_category_name
+            if goal_name is None and getattr(episode, "goals", None):
+                goal_name = getattr(episode.goals[0], "object_category", None)
+            goal_name = goal_name or "unknown"
 
         self.goal_idx = 0
         self.goal_name = goal_name
-        self.gt_goal_idx = self.name2index[goal_name]
-        self.goal_object_id = int(self._env.current_episode.goal_object_id)
+        normalized_goal_name = {
+            "couch": "sofa",
+            "potted plant": "plant",
+            "tv": "tv_monitor",
+        }.get(goal_name, goal_name)
+        self.gt_goal_idx = self.name2index.get(normalized_goal_name, -1)
+        self.goal_object_id = int(getattr(self._env.current_episode, "goal_object_id", -1))
 
     def reset(self):
         """Resets the environment to a new episode.
@@ -150,8 +159,11 @@ class InstanceImageGoal_Env(habitat.RLEnv):
                 instance_imagegoal_file = input("Enter the path to the instance imagegoal file: ")
                 self.info['instance_imagegoal'] = np.array(Image.open(instance_imagegoal_file))
             else:
-                self.info['instance_imagegoal'] = obs['instance_imagegoal']
+                self.info['instance_imagegoal'] = obs.get('instance_imagegoal')
             self.instance_imagegoal = self.info['instance_imagegoal']
+        elif self.args.goal_type == 'object':
+            self.object_goal = self.goal_name
+            self.info['object_goal'] = self.object_goal
         if self.args.goal_type == 'text':
             if self.args.self_designed == True:
                 text_goal = input("Enter the text goal: ")
@@ -169,7 +181,7 @@ class InstanceImageGoal_Env(habitat.RLEnv):
         self.info['goal_cat_id'] = self.gt_goal_idx
         self.info['goal_name'] = self.goal_name
         self.info['agent_height'] = self.agent_height
-        self.info['goal_key'] = self.habitat_env.current_episode.goal_key
+        self.info['goal_key'] = getattr(self.habitat_env.current_episode, "goal_key", None)
         self.info['episode_no'] = self.episode_no
 
         rotation_angle = 0 

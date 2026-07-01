@@ -169,7 +169,10 @@ def run_until_midterm_reached(
                 pass
 
         agent.step_count = step
-        obs, done, info = agent.step(agent_input, visualize=False)
+        # Shorterm/FMM debug images: my_fmm.get_local_goal_fmm only saves when visualize=True
+        shorterm_dir = getattr(agent, "shorterm_save_folder", None)
+        visualize_shorterm = bool(shorterm_dir)
+        obs, done, info = agent.step(agent_input, visualize=visualize_shorterm)
         if getattr(args, "save_episode_video", False) and agent_input.get("_episode_video_frames") is not None:
             record_episode_frame(
                 agent_input=agent_input,

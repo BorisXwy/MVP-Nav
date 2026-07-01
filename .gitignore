@@ -1,0 +1,40 @@
+# Python/runtime
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local environments
+.env
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Large local assets
+/data/
+/outputs/
+/vis_log_nav/
+/vis_log_nav_good/
+/result_nav.txt
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.msgpack
+
+# Downloaded datasets outside the repo are preferred, but ignore accidental copies.
+/sharedata/
+/datasets/
+
+# Paper/source materials are kept locally only.
+/mvp_nav/
+/nvp_nav/
+
+# Local debug/config dumps
+/check/config.txt

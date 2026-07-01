@@ -1,62 +1,93 @@
 """
-MVP-Nav main entry (paper-aligned version, Habitat instance image goal simulation).
+MVP-Nav navigation entry.
 
-Uses the src package: core flow matches RSS2026 MVP-Nav paper and appendix.
-- No finding/judgement edge-repositioning, no pre-trigger; strict Algorithm 1 per-stage order.
-- Judgement success: after rotation capture, decide by LightGlue match count (>= succeed_match_points) between goal image and observations.
-
-Runs single-episode navigation loop via src.pipeline.run_episode.
+The entry is split into config, model loading, env construction and episode
+running so dataset/env smoke tests do not pay the model-loading cost.
 """
 
+from __future__ import annotations
+
+import argparse
 import os
 import sys
-import yaml
+import time
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
+
 import numpy as np
 import torch
-import argparse
-from datetime import datetime
-import time
+import yaml
 
-# Device can be set in config or here
-target_device_id = 0
-if torch.cuda.is_available():
-    torch.cuda.set_device(target_device_id)
+PROJECT_ROOT = Path(__file__).resolve().parent
+for extra_path in [
+    PROJECT_ROOT / "third_party" / "habitat-lab",
+    PROJECT_ROOT / "LightGlue-main",
+]:
+    if extra_path.exists():
+        sys.path.insert(0, str(extra_path))
 
-from src.envs.habitat import construct_envs
-from src.agent.unigoal.agent import UniGoal_Agent
-from src.graph.graphv2 import Graph
-from src.map.spacev6 import Map
-from src.pipeline import run_episode
-from src.map.vggt.models.vggt import VGGT
-
-sys.path.append("third_party/Grounded-Segment-Anything/")
-from grounded_sam_demo import load_model
-from segment_anything import sam_model_registry, SamPredictor
-from lightglue import LightGlue, DISK
+from src.data.nav_datasets import get_spec, verify_dataset
 
 
-def get_config():
-    """Load config: merge CLI args with YAML."""
+DEFAULT_DEVICE_ID = 1
+
+
+@contextmanager
+def timed(label: str):
+    start = time.perf_counter()
+    yield
+    print(f"[time] {label}: {time.perf_counter() - start:.2f}s")
+
+
+def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config-file",
-        default="configs/config_habitat.yaml",
-        metavar="FILE",
-        help="path to config file",
-        type=str,
-    )
-    parser.add_argument("--goal_type", default="ins-image", type=str)
+    parser.add_argument("--config-file", default="configs/config_habitat.yaml", type=str)
+    parser.add_argument("--goal_type", default=None, choices=["ins-image", "text", "object"])
     parser.add_argument("--self_designed", action="store_true")
+    parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID, type=int)
+    parser.add_argument("--nav-dataset", default=None, choices=["instance_imagenav_hm3d", "objectnav_hm3d", "objectnav_mp3d"])
+    parser.add_argument("--data-root", default="/mnt/pool1/sharehome/xiewenyuan/sharedata", type=str)
+    parser.add_argument("--scene-data-root", default="data/scene_datasets", type=str)
+    parser.add_argument("--split", default=None, type=str)
+    parser.add_argument("--num-episodes", default=None, type=int)
+    parser.add_argument("--task-config", default=None, type=str)
+    parser.add_argument("--skip-dataset-check", action="store_true")
+    parser.add_argument("--smoke-env-only", action="store_true")
+    return parser.parse_args()
 
-    args = parser.parse_args([])
 
-    with open(args.config_file, "r") as f:
+def build_config(cli_args):
+    with open(cli_args.config_file, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
-    args_dict = vars(args)
-    args_dict.update(config)
-    args = SimpleNamespace(**args_dict)
 
+    merged = dict(config)
+    merged.update({k: v for k, v in vars(cli_args).items() if v is not None})
+
+    if cli_args.nav_dataset:
+        spec = get_spec(cli_args.nav_dataset)
+        merged["nav_task"] = spec.task
+        merged["nav_dataset_name"] = spec.dataset
+        if cli_args.goal_type is None:
+            merged["goal_type"] = "object" if spec.task == "objectnav" else "ins-image"
+        if cli_args.task_config is None:
+            merged["task_config"] = {
+                "objectnav_hm3d": "tasks/objectnav_hm3d.yaml",
+                "objectnav_mp3d": "tasks/objectnav_mp3d.yaml",
+                "instance_imagenav_hm3d": "tasks/hm3d.yaml",
+            }[cli_args.nav_dataset]
+    elif cli_args.goal_type is None:
+        merged["goal_type"] = merged.get("goal_type", "ins-image")
+
+    if cli_args.split is not None:
+        merged["split"] = cli_args.split
+    if cli_args.num_episodes is not None:
+        merged["num_eval_episodes"] = cli_args.num_episodes
+    if cli_args.task_config is not None:
+        merged["task_config"] = cli_args.task_config
+
+    args = SimpleNamespace(**merged)
     args.is_debugging = sys.gettrace() is not None
     if args.is_debugging:
         args.experiment_id = "debug"
@@ -64,121 +95,163 @@ def get_config():
     args.log_dir = os.path.join(args.dump_location, args.experiment_id, "log")
     args.visualization_dir = os.path.join(args.dump_location, args.experiment_id, "visualization")
     args.map_size = args.map_size_cm // args.map_resolution
-    args.global_width, args.global_height = args.map_size, args.map_size
+    args.global_width = args.map_size
+    args.global_height = args.map_size
     args.local_width = int(args.global_width / args.global_downscaling)
     args.local_height = int(args.global_height / args.global_downscaling)
     args.cuda = torch.cuda.is_available()
-    args.device = torch.device(f"cuda:{target_device_id}" if args.cuda else "cpu")
+    args.device = torch.device(f"cuda:{cli_args.device_id}" if args.cuda else "cpu")
     args.num_scenes = args.num_processes
     args.num_episodes = int(args.num_eval_episodes)
     args.apply_leveling_transform = bool(getattr(args, "apply_leveling_transform", True))
+    args.data_root = cli_args.data_root
+    args.scene_data_root = cli_args.scene_data_root
+    args.skip_dataset_check = cli_args.skip_dataset_check
+    args.smoke_env_only = cli_args.smoke_env_only
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(cli_args.device_id)
 
     return args
 
 
+def check_dataset(args):
+    if not getattr(args, "nav_dataset", None) or args.skip_dataset_check:
+        return
+    spec = get_spec(args.nav_dataset)
+    found = verify_dataset(spec, [args.split], args.data_root)
+    print(f"Dataset ready: {spec.name} -> {found[args.split]}")
+
+
 def add_lightglue_to_model_info(model_info):
-    """Inject LightGlue extractor/matcher into model_info for Graph and Judgement matching."""
+    from lightglue import DISK, LightGlue
+
     if model_info.get("extractor") is not None and model_info.get("matcher") is not None:
         return
-    extractor = DISK(max_num_keypoints=2048).eval().to(model_info["device"])
-    matcher = LightGlue(features="disk").eval().to(model_info["device"])
-    model_info["extractor"] = extractor
-    model_info["matcher"] = matcher
+    model_info["extractor"] = DISK(max_num_keypoints=2048).eval().to(model_info["device"])
+    model_info["matcher"] = LightGlue(features="disk").eval().to(model_info["device"])
 
 
 def initialize_model(args):
-    """Load Grounded-SAM and VGGT."""
+    sys.path.append("third_party/Grounded-Segment-Anything/")
+    from grounded_sam_demo import load_model
+    from segment_anything import SamPredictor, sam_model_registry
+    from src.map.vggt.models.vggt import VGGT
+
     device = args.device
     print(f"Using device: {device}")
 
-    print("Initializing and loading Grounded_SAM model...")
-    groundingdino_config_file = "third_party/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-    groundingdino_checkpoint = "data/models/groundingdino_swint_ogc.pth"
-    sam_version = "vit_h"
-    sam_checkpoint = "data/models/sam_vit_h_4b8939.pth"
-    local_bert_path = "/mnt/pool1/sharehome/xiewenyuan/vlm/object_nav/bert-base-uncased"
-    groundingdino = load_model(
-        groundingdino_config_file, groundingdino_checkpoint, local_bert_path, device
-    )
-    sam_predictor = SamPredictor(
-        sam_model_registry[sam_version](checkpoint=sam_checkpoint).to(device)
-    )
+    with timed("Grounded-SAM load"):
+        groundingdino_config_file = "third_party/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+        groundingdino_checkpoint = "data/models/groundingdino_swint_ogc.pth"
+        sam_checkpoint = "data/models/sam_vit_h_4b8939.pth"
+        local_bert_path = "/mnt/pool1/sharehome/xiewenyuan/vlm/object_nav/bert-base-uncased"
+        groundingdino = load_model(
+            groundingdino_config_file,
+            groundingdino_checkpoint,
+            local_bert_path,
+            device,
+        )
+        sam_predictor = SamPredictor(sam_model_registry["vit_h"](checkpoint=sam_checkpoint).to(device))
 
-    print("Initializing and loading VGGT model...")
-    vggt = VGGT()
-    vggt.load_state_dict(torch.load("data/models/model.pt"))
-    vggt.eval()
+    with timed("VGGT load"):
+        vggt = VGGT()
+        vggt.load_state_dict(torch.load("data/models/model.pt", map_location=device))
+        vggt.eval()
+
     model_info = {
         "vggt": vggt,
         "groundingdino": groundingdino,
         "sam_predictor": sam_predictor,
         "device": device,
     }
+    add_lightglue_to_model_info(model_info)
     return model_info
 
 
-def main():
-    args = get_config()
-    model_info = initialize_model(args)
+def make_episode_dirs(experiment_dir, episode_idx):
+    episode_dir = Path(experiment_dir) / f"episode_{episode_idx}"
+    dirs = {
+        "episode": episode_dir,
+        "obs": episode_dir / "saved_images",
+        "segment": episode_dir / "saved_segment_results",
+        "depth": episode_dir / "saved_depths",
+        "midterm": episode_dir / "saved_midterm_planned",
+        "shorterm": episode_dir / "saved_shorterm_planned",
+    }
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return dirs
+
+
+def configure_goal(graph, envs, args):
+    if getattr(args, "goal_type", None) == "object":
+        goal_name = getattr(envs, "goal_name", None) or getattr(envs, "object_goal", None)
+        graph.set_image_goal(None, {"main_objects": [goal_name], "sub_objects": []})
+        return
+    graph.set_image_goal(envs.instance_imagegoal)
+
+
+def run_smoke_env(args):
+    from src.envs.habitat import construct_envs
+
+    with timed("Habitat env construction"):
+        envs = construct_envs(args)
+    with timed("Habitat reset"):
+        obs, info = envs.reset()
+    print(
+        "Smoke reset ok: "
+        f"scene={getattr(envs, 'scene_path', None)}, "
+        f"goal={info.get('goal_name')}, "
+        f"obs_keys={sorted(obs.keys())}"
+    )
+
+
+def run_navigation(args):
+    from src.agent.unigoal.agent import UniGoal_Agent
+    from src.envs.habitat import construct_envs
+    from src.graph.graphv2 import Graph
+    from src.map.spacev6 import Map
+    from src.pipeline import run_episode
+
     os.makedirs(args.log_dir, exist_ok=True)
     os.makedirs(args.visualization_dir, exist_ok=True)
 
-    add_lightglue_to_model_info(model_info)
-    envs = construct_envs(args)
-    step_size = envs.config["simulator"]["forward_step_size"]
-    args.step_size = step_size
+    model_info = initialize_model(args)
+    with timed("Habitat env construction"):
+        envs = construct_envs(args)
+
+    args.step_size = envs.config["simulator"]["forward_step_size"]
     agent = UniGoal_Agent(args, envs, model_info)
 
     current_time = datetime.now().strftime("%Y%m%d-%H-%M")
-    # Paper-version log dir (separate from main.py vis_log for comparison)
     experiment_dir = os.path.join("vis_log_nav", current_time)
-    os.makedirs(experiment_dir, exist_ok=True)
     good_experiment_dir = os.path.join("vis_log_nav_good", current_time)
+    os.makedirs(experiment_dir, exist_ok=True)
     os.makedirs(good_experiment_dir, exist_ok=True)
     experiment_result_path = os.path.join(experiment_dir, "experiment_result.txt")
-    with open(experiment_result_path, "w", encoding="utf-8") as exp_f:
-        exp_f.write(f"Experiment start (paper-aligned src): {current_time}\n")
 
+    with open(experiment_result_path, "w", encoding="utf-8") as exp_f:
+        exp_f.write(f"Experiment start: {current_time}\n")
     with open("result_nav.txt", "w", encoding="utf-8") as result_f:
-        result_f.write(f"Experiment start (paper-aligned): {current_time}\n")
+        result_f.write(f"Experiment start: {current_time}\n")
         result_f.write(f"Episode logs: {experiment_dir}\n")
 
     success_count = 0
-    episode_idx = 0
-    finished = False
+    for episode_idx in range(args.num_episodes):
+        episode_start_time = time.time()
+        dirs = make_episode_dirs(experiment_dir, episode_idx)
+        episode_result_path = dirs["episode"] / "result.txt"
 
-    while not finished:
         try:
-            episode_dir = os.path.join(experiment_dir, f"episode_{episode_idx}")
-            obs_save_folder = os.path.join(episode_dir, "saved_images")
-            segment_save_folder = os.path.join(episode_dir, "saved_segment_results")
-            depth_save_folder = os.path.join(episode_dir, "saved_depths")
-            midterm_save_folder = os.path.join(episode_dir, "saved_midterm_planned")
-            shorterm_save_folder = os.path.join(episode_dir, "saved_shorterm_planned")
-            for folder in [
-                obs_save_folder,
-                depth_save_folder,
-                segment_save_folder,
-                midterm_save_folder,
-                shorterm_save_folder,
-            ]:
-                os.makedirs(folder, exist_ok=True)
-
-            episode_result_path = os.path.join(episode_dir, "result.txt")
-            episode_start_time = time.time()
-
-            args.midterm_save_folder = midterm_save_folder
+            args.midterm_save_folder = str(dirs["midterm"])
             graph = Graph(args=args, model_info=model_info)
             obs, infos = agent.reset()
-            graph.set_image_goal(envs.instance_imagegoal)
-
-            prep_end_time = time.time()
-            prep_elapsed = prep_end_time - episode_start_time
+            configure_goal(graph, envs, args)
 
             with open(episode_result_path, "w", encoding="utf-8") as result_f:
-                result_f.write(f"=== Episode: {episode_idx} (paper-aligned) ===\n")
-                result_f.write(f"Prep time: {prep_elapsed:.2f} s\n")
-
+                result_f.write(f"=== Episode: {episode_idx} ===\n")
+                result_f.write(f"Prep time: {time.time() - episode_start_time:.2f} s\n")
                 nav_start_time = time.time()
                 success_this, step_count = run_episode(
                     episode_idx,
@@ -189,66 +262,77 @@ def main():
                     model_info,
                     args,
                     use_vlm_per_stage=getattr(args, "use_vlm_per_stage", True),
-                    obs_save_folder=obs_save_folder,
-                    depth_save_folder=depth_save_folder,
-                    segment_save_folder=segment_save_folder,
-                    midterm_save_folder=midterm_save_folder,
-                    shorterm_save_folder=shorterm_save_folder,
+                    obs_save_folder=str(dirs["obs"]),
+                    depth_save_folder=str(dirs["depth"]),
+                    segment_save_folder=str(dirs["segment"]),
+                    midterm_save_folder=str(dirs["midterm"]),
+                    shorterm_save_folder=str(dirs["shorterm"]),
                     result_file_handle=result_f,
                 )
-                nav_elapsed = time.time() - nav_start_time
-                total_elapsed = time.time() - episode_start_time
-
-                result_f.write(f"Nav time: {nav_elapsed:.2f} s\n")
+                result_f.write(f"Nav time: {time.time() - nav_start_time:.2f} s\n")
                 result_f.write(f"Steps this episode: {step_count}\n")
-                result_f.write(f"Total time this episode: {total_elapsed:.2f} s\n")
+                result_f.write(f"Total time this episode: {time.time() - episode_start_time:.2f} s\n")
 
-            with open(experiment_result_path, "a", encoding="utf-8") as exp_f:
-                exp_f.write(
-                    f"Episode {episode_idx}: success={int(bool(success_this))}, "
-                    f"steps={step_count}, total_time={total_elapsed:.2f} s\n"
-                )
+            success_count += int(bool(success_this))
+            append_experiment_result(experiment_result_path, episode_idx, success_this, step_count, episode_start_time)
+            save_good_episode_if_needed(envs, success_this, dirs["episode"], good_experiment_dir, episode_idx)
+        except Exception as exc:
+            log_episode_exception(exc, episode_idx, experiment_dir, experiment_result_path)
 
-            if success_this:
-                success_count += 1
-                try:
-                    is_good = False
-                    if hasattr(envs, "is_agent_at_goal_border"):
-                        is_good = envs.is_agent_at_goal_border(pixel_threshold=5)
-                    if is_good:
-                        import shutil
-                        good_episode_dir = os.path.join(good_experiment_dir, f"episode_{episode_idx}")
-                        shutil.copytree(episode_dir, good_episode_dir, dirs_exist_ok=True)
-                        print(f"[GOOD] Episode {episode_idx} saved to {good_episode_dir}")
-                except Exception as copy_e:
-                    print(f"Failed to save good episode: {copy_e}")
-
-        except Exception as e:
-            import traceback
-            msg = f"!!! Episode {episode_idx} exception: {str(e)}"
-            print(msg)
-            traceback.print_exc()
-            episode_dir = os.path.join(experiment_dir, f"episode_{episode_idx}")
-            os.makedirs(episode_dir, exist_ok=True)
-            episode_result_path = os.path.join(episode_dir, "result.txt")
-            with open(episode_result_path, "a", encoding="utf-8") as result_f:
-                result_f.write(msg + "\n")
-            with open(experiment_result_path, "a", encoding="utf-8") as exp_f:
-                exp_f.write(msg + "\n")
-            with open("result_nav.txt", "a", encoding="utf-8") as f:
-                f.write(msg + "\n")
-
-        episode_idx += 1
-        if episode_idx >= args.num_episodes:
-            finished = True
-
-    sr = success_count / episode_idx if episode_idx > 0 else 0
-    summary = f"Success rate: {sr}"
+    total = max(args.num_episodes, 1)
+    summary = f"Success rate: {success_count / total}"
     print(summary)
     with open(experiment_result_path, "a", encoding="utf-8") as exp_f:
         exp_f.write(summary + "\n")
     with open("result_nav.txt", "a", encoding="utf-8") as f:
         f.write(summary + "\n")
+
+
+def append_experiment_result(path, episode_idx, success, steps, episode_start_time):
+    with open(path, "a", encoding="utf-8") as exp_f:
+        exp_f.write(
+            f"Episode {episode_idx}: success={int(bool(success))}, "
+            f"steps={steps}, total_time={time.time() - episode_start_time:.2f} s\n"
+        )
+
+
+def save_good_episode_if_needed(envs, success, episode_dir, good_experiment_dir, episode_idx):
+    if not success or not hasattr(envs, "is_agent_at_goal_border"):
+        return
+    try:
+        if envs.is_agent_at_goal_border(pixel_threshold=5):
+            import shutil
+
+            good_episode_dir = os.path.join(good_experiment_dir, f"episode_{episode_idx}")
+            shutil.copytree(episode_dir, good_episode_dir, dirs_exist_ok=True)
+            print(f"[GOOD] Episode {episode_idx} saved to {good_episode_dir}")
+    except Exception as exc:
+        print(f"Failed to save good episode: {exc}")
+
+
+def log_episode_exception(exc, episode_idx, experiment_dir, experiment_result_path):
+    import traceback
+
+    msg = f"!!! Episode {episode_idx} exception: {exc}"
+    print(msg)
+    traceback.print_exc()
+    episode_dir = Path(experiment_dir) / f"episode_{episode_idx}"
+    episode_dir.mkdir(parents=True, exist_ok=True)
+    with open(episode_dir / "result.txt", "a", encoding="utf-8") as result_f:
+        result_f.write(msg + "\n")
+    with open(experiment_result_path, "a", encoding="utf-8") as exp_f:
+        exp_f.write(msg + "\n")
+    with open("result_nav.txt", "a", encoding="utf-8") as f:
+        f.write(msg + "\n")
+
+
+def main():
+    args = build_config(parse_args())
+    check_dataset(args)
+    if args.smoke_env_only:
+        run_smoke_env(args)
+    else:
+        run_navigation(args)
 
 
 if __name__ == "__main__":

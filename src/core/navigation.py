@@ -3,6 +3,7 @@ Paper Algorithm 1: MVP-Nav recursive navigation loop.
 Order: Physical Perception -> (optional) VLM Reasoning -> MVM Planning -> Low-level Execution.
 """
 
+import json
 from typing import Any, Dict, Optional, TextIO, Type
 
 import numpy as np
@@ -19,6 +20,15 @@ from .low_level_execution import (
     check_goal_match_in_obs,
 )
 from .episode_video import write_episode_video
+
+
+def _log_gssl_snapshot(graph: Any, loc_agent: Any, log_fn) -> None:
+    """Append GSSL (object list without original_obj refs) to episode result log."""
+    if not getattr(graph, "GSSL", None):
+        graph.GSSL_gen(loc_agent)
+    gssl = getattr(graph, "GSSL", None) or []
+    rows = [{k: v for k, v in item.items() if k != "original_obj"} for item in gssl]
+    log_fn("GSSL:\n" + json.dumps(rows, ensure_ascii=False, indent=2))
 
 
 def run_episode(
@@ -128,6 +138,8 @@ def run_episode(
                 run_vlm_reasoning(graph, loc_agent, current_img, goal_img)
             except Exception as e:
                 log(f"VLM per stage skip: {e}")
+
+        _log_gssl_snapshot(graph, loc_agent, log)
 
         # ----- 4. MVM Planning (fuse_fields_and_extract_goal) -----
         nav_mode, midterm_goal = run_mvm_planning(graph, loc_agent, vis=True)
