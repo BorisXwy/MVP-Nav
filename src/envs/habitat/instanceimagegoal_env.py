@@ -211,11 +211,10 @@ class InstanceImageGoal_Env(habitat.RLEnv):
             info (dict): contains timestep, pose, goal category and
                          evaluation metric info
         """
-        if action == 0:
-        # if action['action_args']['velocity_stop'] > 0:
+        action_id = action.get("action") if isinstance(action, dict) else action
+        if action_id == 0:
+            # Habitat navigation metrics only mark success after STOP is called.
             self.stopped = True
-            # Not sending stop to simulator, resetting manually
-            # action = 3
 
         if self.args.environment == 'habitat':
             obs, rew, done, _ = super().step(action)

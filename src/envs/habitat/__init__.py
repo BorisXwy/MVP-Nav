@@ -80,6 +80,8 @@ def construct_envs(args):
 
     config_env.habitat.simulator.agents.main_agent.height = args.camera_height
     config_env.habitat.simulator.turn_angle = args.turn_angle
+    if getattr(args, "max_episode_steps", None) is not None:
+        _omega_update(config_env, "habitat.environment.max_episode_steps", int(args.max_episode_steps))
 
     config_env.habitat.dataset.split = args.split
 

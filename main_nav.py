@@ -88,6 +88,7 @@ def build_config(cli_args):
         merged["num_eval_episodes"] = cli_args.num_episodes
     if cli_args.max_episode_length is not None:
         merged["max_episode_length"] = cli_args.max_episode_length
+        merged["max_episode_steps"] = cli_args.max_episode_length
     if cli_args.task_config is not None:
         merged["task_config"] = cli_args.task_config
 
@@ -218,6 +219,7 @@ def run_navigation(args):
     from src.graph.graphv2 import Graph
     from src.map.spacev6 import Map
     from src.pipeline import run_episode
+    from src.core.nav_metrics import summarize_nav_metrics, zero_nav_metrics
 
     os.makedirs(args.log_dir, exist_ok=True)
     os.makedirs(args.visualization_dir, exist_ok=True)
@@ -243,6 +245,7 @@ def run_navigation(args):
         result_f.write(f"Episode logs: {experiment_dir}\n")
 
     success_count = 0
+    metric_rows = []
     for episode_idx in range(args.num_episodes):
         episode_start_time = time.time()
         dirs = make_episode_dirs(experiment_dir, episode_idx)
@@ -258,7 +261,7 @@ def run_navigation(args):
                 result_f.write(f"=== Episode: {episode_idx} ===\n")
                 result_f.write(f"Prep time: {time.time() - episode_start_time:.2f} s\n")
                 nav_start_time = time.time()
-                success_this, step_count = run_episode(
+                success_this, step_count, episode_metrics = run_episode(
                     episode_idx,
                     envs,
                     agent,
@@ -276,16 +279,37 @@ def run_navigation(args):
                 )
                 result_f.write(f"Nav time: {time.time() - nav_start_time:.2f} s\n")
                 result_f.write(f"Steps this episode: {step_count}\n")
+                result_f.write(
+                    "Metrics this episode: "
+                    f"success={episode_metrics['success']:.3f}, "
+                    f"spl={episode_metrics['spl']:.3f}, "
+                    f"soft_spl={episode_metrics['soft_spl']:.3f}, "
+                    f"distance_to_goal={episode_metrics['distance_to_goal']:.3f}\n"
+                )
                 result_f.write(f"Total time this episode: {time.time() - episode_start_time:.2f} s\n")
 
             success_count += int(bool(success_this))
-            append_experiment_result(experiment_result_path, episode_idx, success_this, step_count, episode_start_time)
+            metric_rows.append(episode_metrics)
+            append_experiment_result(
+                experiment_result_path,
+                episode_idx,
+                success_this,
+                step_count,
+                episode_start_time,
+                episode_metrics,
+            )
             save_good_episode_if_needed(envs, success_this, dirs["episode"], good_experiment_dir, episode_idx)
         except Exception as exc:
+            metric_rows.append(zero_nav_metrics())
             log_episode_exception(exc, episode_idx, experiment_dir, experiment_result_path)
 
-    total = max(args.num_episodes, 1)
-    summary = f"Success rate: {success_count / total}"
+    summary_metrics = summarize_nav_metrics(metric_rows)
+    summary = (
+        f"SR: {summary_metrics['sr']:.4f}, "
+        f"SPL: {summary_metrics['spl']:.4f}, "
+        f"SoftSPL: {summary_metrics['soft_spl']:.4f}, "
+        f"DTS: {summary_metrics['distance_to_goal']:.4f}"
+    )
     print(summary)
     with open(experiment_result_path, "a", encoding="utf-8") as exp_f:
         exp_f.write(summary + "\n")
@@ -293,10 +317,13 @@ def run_navigation(args):
         f.write(summary + "\n")
 
 
-def append_experiment_result(path, episode_idx, success, steps, episode_start_time):
+def append_experiment_result(path, episode_idx, success, steps, episode_start_time, metrics):
     with open(path, "a", encoding="utf-8") as exp_f:
         exp_f.write(
             f"Episode {episode_idx}: success={int(bool(success))}, "
+            f"spl={metrics['spl']:.4f}, "
+            f"soft_spl={metrics['soft_spl']:.4f}, "
+            f"distance_to_goal={metrics['distance_to_goal']:.4f}, "
             f"steps={steps}, total_time={time.time() - episode_start_time:.2f} s\n"
         )
 

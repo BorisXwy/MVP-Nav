@@ -20,6 +20,7 @@ from .low_level_execution import (
     check_goal_match_in_obs,
 )
 from .episode_video import write_episode_video
+from .nav_metrics import coerce_nav_metrics, zero_nav_metrics
 
 
 def _log_gssl_snapshot(graph: Any, loc_agent: Any, log_fn) -> None:
@@ -29,6 +30,17 @@ def _log_gssl_snapshot(graph: Any, loc_agent: Any, log_fn) -> None:
     gssl = getattr(graph, "GSSL", None) or []
     rows = [{k: v for k, v in item.items() if k != "original_obj"} for item in gssl]
     log_fn("GSSL:\n" + json.dumps(rows, ensure_ascii=False, indent=2))
+
+
+def _issue_stop_and_get_metrics(envs: Any, log_fn) -> Dict[str, float]:
+    """Call Habitat STOP and return standard navigation metrics."""
+    try:
+        _, _, info = envs.step({"action": 0})
+        metrics = coerce_nav_metrics(info)
+    except Exception as exc:
+        log_fn(f"STOP metric collection failed: {exc}")
+        metrics = zero_nav_metrics()
+    return metrics
 
 
 def run_episode(
@@ -58,7 +70,7 @@ def run_episode(
       4. Low-level Execution: A* + FMM to gmid or finding/judgement branch
 
     Returns:
-        (success, step): whether this episode succeeded, total step count.
+        (success, step, metrics): Habitat-standard success, total step count and metrics.
     """
     def log(s: str) -> None:
         print(s)
@@ -107,6 +119,7 @@ def run_episode(
     set1 = 0
     current_step = step
     success = False
+    final_metrics = zero_nav_metrics()
     # Max steps per episode (default 200, overridable by args.max_episode_steps)
     max_steps = getattr(args, "max_episode_steps", 200) or 200
     map_inst = None
@@ -176,6 +189,17 @@ def run_episode(
             step += step_delta
             # Paper: after rotation in Judgement, decide arrival by goal-vs-observation match
             if nav_mode == "judgement":
+                if getattr(args, "goal_type", None) == "object":
+                    final_metrics = _issue_stop_and_get_metrics(envs, log)
+                    success = final_metrics["success"] > 0.0
+                    log(
+                        "episode STOP metrics: "
+                        f"success={final_metrics['success']:.3f}, "
+                        f"spl={final_metrics['spl']:.3f}, "
+                        f"soft_spl={final_metrics['soft_spl']:.3f}, "
+                        f"distance_to_goal={final_metrics['distance_to_goal']:.3f}"
+                    )
+                    break
                 goal_img = getattr(envs, "instance_imagegoal", None)
                 if goal_img is not None:
                     success = check_goal_match_in_obs(
@@ -185,6 +209,7 @@ def run_episode(
                         succeed_match_points,
                     )
                     if success:
+                        final_metrics = _issue_stop_and_get_metrics(envs, log)
                         log("episode success (goal match >= threshold)")
                         break
         elif nav_mode == "explore" and midterm_goal is not None:
@@ -199,6 +224,8 @@ def run_episode(
             )
             step += step_delta
             if done:
+                final_metrics = coerce_nav_metrics(getattr(envs, "info", {}))
+                success = final_metrics["success"] > 0.0
                 break
 
         set2, set1, current_step = set1, current_step, step
@@ -229,4 +256,8 @@ def run_episode(
             except Exception as e:
                 log(f"save_episode_video failed: {e}")
 
-    return success, step
+    if not success and final_metrics == zero_nav_metrics() and getattr(envs, "info", None):
+        final_metrics = coerce_nav_metrics(envs.info)
+        success = final_metrics["success"] > 0.0
+
+    return success, step, final_metrics

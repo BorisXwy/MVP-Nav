@@ -37,4 +37,7 @@ habitat:
     split: val
     data_path: /mnt/pool1/sharehome/xiewenyuan/sharedata/datasets/objectnav/mp3d/v1/{split}/{split}.json.gz
     scenes_dir: data/scene_datasets/mp3d
-
+  task:
+    measurements:
+      success:
+        success_distance: 1.0
