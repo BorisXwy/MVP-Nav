@@ -71,8 +71,8 @@ map_size_cm: 3600
 # LLM and VLM
 llm_model: "gpt-3.5-turbo"
 vlm_model: "gpt-3.5-turbo"
-api_key: "sk-IZiNQjv9P4AflJhRtRsOrhMr5mnoVKDMnid9y4C17jC0ZKMq"
-base_url: "http://35.220.164.252:3888/v1"
+api_key: ""
+base_url: ""
 
 # --- 建图水平校正（点云与轨迹整体旋转，使相机平面与水平面对齐）---
 apply_leveling_transform: true
