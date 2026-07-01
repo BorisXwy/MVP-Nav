@@ -84,13 +84,19 @@ obstacle_dilate_iterations: 0
 # 1. 目标投影安全性检查（两个独立开关）：
 #    - 计算与可视化：为 true 时会计算 g_st 投影与地面掩码校验，并在 episode 视频中可视化（不参与决策）
 #    - 参与决策：为 true 时在“前进”前若校验不通过则改为原地旋转
-safety_verification_compute_and_visualize: True
+safety_verification_compute_and_visualize: false
 safety_verification_use_in_decision: false
 # 2. 预触发与无缝切换：当机器人到当前 g_mid 的欧式距离 < pretrigger_epsilon_bev（BEV 像素）时，提前触发下一阶段高层推理，实现平滑过渡
 use_pretrigger: false
 pretrigger_epsilon_bev: 3.0
 # 3. 每 episode 结束后保存本 episode 汇总视频（每帧：观测、语义分割、BEV+每步位姿与短期/中期目标；可选安全性可视化）
-save_episode_video: true
+save_episode_video: false
+save_step_images: false
+save_segment_debug: false
+save_shortterm_debug: false
+save_raw_pcd: false
+vggt_max_frames: 12
+keep_vggt_on_gpu: false
 # 4. 探索历史场：始终计算并可视化；为 true 时参与融合决策（值越大越未探索），为 false 时传入全 1 不影响目标
 use_exploration_history_field: false
 exploration_history_sigma: 10

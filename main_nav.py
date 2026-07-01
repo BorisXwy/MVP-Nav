@@ -53,6 +53,7 @@ def parse_args():
     parser.add_argument("--bert-path", default="data/models/bert-base-uncased", type=str)
     parser.add_argument("--split", default=None, type=str)
     parser.add_argument("--num-episodes", default=None, type=int)
+    parser.add_argument("--max-episode-length", default=None, type=int)
     parser.add_argument("--task-config", default=None, type=str)
     parser.add_argument("--skip-dataset-check", action="store_true")
     parser.add_argument("--smoke-env-only", action="store_true")
@@ -85,6 +86,8 @@ def build_config(cli_args):
         merged["split"] = cli_args.split
     if cli_args.num_episodes is not None:
         merged["num_eval_episodes"] = cli_args.num_episodes
+    if cli_args.max_episode_length is not None:
+        merged["max_episode_length"] = cli_args.max_episode_length
     if cli_args.task_config is not None:
         merged["task_config"] = cli_args.task_config
 

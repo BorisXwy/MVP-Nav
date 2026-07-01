@@ -17,6 +17,7 @@ env/
 # Large local assets
 /data/
 /outputs/
+/logs/
 /vis_log_nav/
 /vis_log_nav_good/
 /result_nav.txt

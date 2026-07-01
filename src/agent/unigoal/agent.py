@@ -292,10 +292,11 @@ class UniGoal_Agent():
             if getattr(self.args, "save_episode_video", False):
                 self._last_ground_mask = ground_mask
 
-            filename = f"image_{self.step_count}.png"
-            filepath = os.path.join(self.obs_save_folder, filename)
-            rgb_bgr = cv2.cvtColor(cropped_obs, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(filepath, rgb_bgr)
+            if getattr(self.args, "save_step_images", False) and self.obs_save_folder:
+                filename = f"image_{self.step_count}.png"
+                filepath = os.path.join(self.obs_save_folder, filename)
+                rgb_bgr = cv2.cvtColor(cropped_obs, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(filepath, rgb_bgr)
 
             self.obs_history.append(obs_tensor)  
 
@@ -336,7 +337,11 @@ class UniGoal_Agent():
                     step_size = 50,
                     visualize = visualize,
                     global_path= path,
-                    save_path = os.path.join(self.shorterm_save_folder,f"step_{self.step_count}.png")
+                    save_path = (
+                        os.path.join(self.shorterm_save_folder, f"step_{self.step_count}.png")
+                        if visualize and self.shorterm_save_folder
+                        else None
+                    )
                 )
                 self.shorterm_goal = (stg_x, stg_y)
 
@@ -796,7 +801,7 @@ class UniGoal_Agent():
                 top_row = np.hstack(resized_images[:2])
                 bottom_row = np.hstack(resized_images[2:])
                 four_grid_image = np.vstack([top_row, bottom_row])
-                if self.segment_save_folder is not None:
+                if getattr(self.args, "save_segment_debug", False) and self.segment_save_folder is not None:
                     output_filename = os.path.join(self.segment_save_folder, f"step{self.step_count}.png") 
                     cv2.imwrite(output_filename, cv2.cvtColor(four_grid_image, cv2.COLOR_RGB2BGR))
                 return annotated_images_for_stitching, ground_mask

@@ -1,4 +1,5 @@
 import os
+import gc
 import numpy as np
 import torch
 import cv2
@@ -154,6 +155,7 @@ class Map:
         self.device = model_info['device']
         self.args = args
         self.real_camera_height = args.camera_height
+        self.frame_indices = []
                 
     def obs_load(self):
 
@@ -172,33 +174,42 @@ class Map:
         if self.start_index > self.end_index:
             print("Error: Invalid image index range (start_index=%s, end_index=%s, len(obs_history)=%s)." % (self.start_index, self.end_index, n_obs))
             return
-        list_of_tensors = []
-        for index in range(self.start_index, self.end_index + 1):
-            list_of_tensors.append(obs_history[index])
+        raw_indices = list(range(self.start_index, self.end_index + 1))
+        max_frames = int(getattr(self.args, "vggt_max_frames", 0) or 0)
+        if max_frames > 0 and len(raw_indices) > max_frames:
+            sample_positions = np.linspace(0, len(raw_indices) - 1, max_frames)
+            self.frame_indices = [raw_indices[int(round(pos))] for pos in sample_positions]
+            # Preserve ordering while removing duplicates caused by small ranges.
+            self.frame_indices = list(dict.fromkeys(self.frame_indices))
+        else:
+            self.frame_indices = raw_indices
+
+        list_of_tensors = [obs_history[index].detach().cpu() for index in self.frame_indices]
 
         node_seg = getattr(self.obs_provider, "node_segment_result", [])
         main_seg = getattr(self.obs_provider, "main_segment_result", [])
         sub_seg = getattr(self.obs_provider, "sub_segment_result", [])
         self.node_segment_results = [
             result for result in node_seg
-            if self.start_index <= result['frame_index'] <= self.end_index 
+            if result['frame_index'] in self.frame_indices
         ]
         self.main_segment_results = [
             result for result in main_seg
-            if self.start_index <= result['frame_index'] <= self.end_index 
+            if result['frame_index'] in self.frame_indices
         ]
         self.sub_segment_results = [
             result for result in sub_seg
-            if self.start_index <= result['frame_index'] <= self.end_index 
+            if result['frame_index'] in self.frame_indices
         ]
         self.images = torch.stack(list_of_tensors, dim=0)
 
         segment_save_folder = getattr(self.obs_provider, "segment_save_folder", "")
-        for i in range(self.start_index,self.end_index + 1):
+        for i in self.frame_indices:
             file_name = f"step{i}.png"
             source_file_path = os.path.join(segment_save_folder, file_name)
             target_file_path = os.path.join(self.segment_save_folder, file_name)    
-            shutil.copy2(source_file_path, target_file_path)
+            if os.path.exists(source_file_path):
+                shutil.copy2(source_file_path, target_file_path)
 
     def build_pcd(self):
 
@@ -212,9 +223,9 @@ class Map:
 
         # --- VGG-T 推理部分 (保持不变) ---
         dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-        with torch.no_grad():
+        with torch.inference_mode():
             with torch.cuda.amp.autocast(dtype=dtype):
-                self.predictions = self.vggt(self.images.to(self.device))
+                self.predictions = self.vggt(self.images.to(self.device, non_blocking=True))
         predictions = self.predictions
 
         extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], self.images.shape[-2:])
@@ -234,7 +245,9 @@ class Map:
         CONF_THRESHOLD_3D = np.percentile(conf_flat, CONF_THRESHOLD_PERCENTILE)
         # -------------------------------------------------------------------
 
-        for frame_index in range(self.end_index - self.start_index + 1):
+        num_stage_frames = len(self.frame_indices)
+        for frame_index in range(num_stage_frames):
+            actual_frame_index = self.frame_indices[frame_index]
             try:
                 # 提取当前帧数据
                 depth_map = predictions["depth"][0][frame_index]
@@ -243,13 +256,13 @@ class Map:
                 extrinsic = predictions["extrinsic"][0][frame_index]
                 intrinsic = predictions["intrinsic"][0][frame_index]
                 detections_node = [
-                    result for result in self.node_segment_results if result['frame_index'] == frame_index + self.start_index
+                    result for result in self.node_segment_results if result['frame_index'] == actual_frame_index
                 ]
                 detections_main = [
-                    result for result in self.main_segment_results if result['frame_index'] == frame_index + self.start_index
+                    result for result in self.main_segment_results if result['frame_index'] == actual_frame_index
                 ]
                 detections_sub = [
-                    result for result in self.sub_segment_results if result['frame_index'] == frame_index + self.start_index
+                    result for result in self.sub_segment_results if result['frame_index'] == actual_frame_index
                 ]
                 detections = {
                     "node": detections_node,
@@ -344,7 +357,7 @@ class Map:
                     self.objects_in_scene[key].append({
                         'caption': [caption],
                         'center': center_pcd,
-                        'frame_index': frame_index,
+                        'frame_index': actual_frame_index,
                         'extent': extent_pcd,
                         'volume': volume_3d,
                         'orientation': orientation_pcd,
@@ -422,10 +435,17 @@ class Map:
         vertex_data['blue'] = filtered_colors[:, 2]
         
         self.recent_pcd = PlyData([PlyElement.describe(vertex_data, name='vertex')], text=False)
-        file_path = os.path.join(self.save_folder, 'raw_pcd.ply')
-        self.recent_pcd.write(file_path)
+        if getattr(self.args, "save_raw_pcd", False):
+            file_path = os.path.join(self.save_folder, 'raw_pcd.ply')
+            self.recent_pcd.write(file_path)
 
-        self.vggt.to("cpu")
+        self.predictions = None
+        del predictions
+        if not getattr(self.args, "keep_vggt_on_gpu", False):
+            self.vggt.to("cpu")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        gc.collect()
 
     def pre_cluster_objects(self, objects, eps_ratio: float = 0.1, min_samples: int = 4, vis: bool = True, ):
         """
@@ -624,7 +644,7 @@ class Map:
         # ====================================================================
         # --- 【新增】保存带OBB框的点云为PLY文件（多种 OBB 变体）---
         # ====================================================================
-        if vis:
+        if vis and getattr(self.args, "save_raw_pcd", False):
             if self.recent_pcd is not None:
                 try:
                     # 1) 原始单实例 OBB（未聚类、未融合）：objects_in_scene
@@ -1270,15 +1290,11 @@ class Map:
     def run_stage(self, loc_agent_sim):
         """
         论文 §III-C Physical Perception：单阶段完整流程。
-        obs_load → build_pcd → merge_objects → generate_map_and_fields → convert_to_sim，
+        build_pcd → merge_objects → generate_map_and_fields → convert_to_sim，
         返回 map_info 供 VLM/MVM 使用。
         """
-        self.obs_load()
         self.build_pcd()
         self.merge_objects()
         self.generate_map_and_fields(loc_agent_sim=loc_agent_sim)
         self.convert_to_sim()
         return self.map_info
-
-
-
