@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 
-DEFAULT_SHAREDATA_ROOT = Path("/mnt/pool1/sharehome/xiewenyuan/sharedata")
+DEFAULT_SHAREDATA_ROOT = Path("sharedata")
 DEFAULT_LOCAL_DATA_ROOT = Path("data")
 
 

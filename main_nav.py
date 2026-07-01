@@ -48,8 +48,9 @@ def parse_args():
     parser.add_argument("--self_designed", action="store_true")
     parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID, type=int)
     parser.add_argument("--nav-dataset", default=None, choices=["instance_imagenav_hm3d", "objectnav_hm3d", "objectnav_mp3d"])
-    parser.add_argument("--data-root", default="/mnt/pool1/sharehome/xiewenyuan/sharedata", type=str)
+    parser.add_argument("--data-root", default="sharedata", type=str)
     parser.add_argument("--scene-data-root", default="data/scene_datasets", type=str)
+    parser.add_argument("--bert-path", default="data/models/bert-base-uncased", type=str)
     parser.add_argument("--split", default=None, type=str)
     parser.add_argument("--num-episodes", default=None, type=int)
     parser.add_argument("--task-config", default=None, type=str)
@@ -106,6 +107,7 @@ def build_config(cli_args):
     args.apply_leveling_transform = bool(getattr(args, "apply_leveling_transform", True))
     args.data_root = cli_args.data_root
     args.scene_data_root = cli_args.scene_data_root
+    args.bert_path = cli_args.bert_path
     args.skip_dataset_check = cli_args.skip_dataset_check
     args.smoke_env_only = cli_args.smoke_env_only
 
@@ -145,7 +147,7 @@ def initialize_model(args):
         groundingdino_config_file = "third_party/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
         groundingdino_checkpoint = "data/models/groundingdino_swint_ogc.pth"
         sam_checkpoint = "data/models/sam_vit_h_4b8939.pth"
-        local_bert_path = "/mnt/pool1/sharehome/xiewenyuan/vlm/object_nav/bert-base-uncased"
+        local_bert_path = args.bert_path
         groundingdino = load_model(
             groundingdino_config_file,
             groundingdino_checkpoint,

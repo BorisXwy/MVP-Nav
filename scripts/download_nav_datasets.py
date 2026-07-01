@@ -55,7 +55,7 @@ def download_and_extract(dataset_name, data_root):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="all", choices=["all", *sorted(DATASET_SPECS)])
-    parser.add_argument("--data-root", default="/mnt/pool1/sharehome/xiewenyuan/sharedata")
+    parser.add_argument("--data-root", default="sharedata")
     args = parser.parse_args()
 
     names = sorted(DATASET_SPECS) if args.dataset == "all" else [args.dataset]
