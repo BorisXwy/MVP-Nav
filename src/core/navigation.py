@@ -4,9 +4,8 @@ Order: Physical Perception -> (optional) VLM Reasoning -> MVM Planning -> Low-le
 """
 
 import json
+import os
 from typing import Any, Dict, Optional, TextIO, Type
-
-import numpy as np
 
 from src.utils.my_tools import apply_transform
 
@@ -41,6 +40,128 @@ def _issue_stop_and_get_metrics(envs: Any, log_fn) -> Dict[str, float]:
         log_fn(f"STOP metric collection failed: {exc}")
         metrics = zero_nav_metrics()
     return metrics
+
+
+def _configure_episode_outputs(
+    agent: Any,
+    graph: Any,
+    args: Any,
+    *,
+    obs_save_folder: Optional[str],
+    depth_save_folder: Optional[str],
+    segment_save_folder: Optional[str],
+    midterm_save_folder: Optional[str],
+    shorterm_save_folder: Optional[str],
+) -> None:
+    if obs_save_folder:
+        agent.obs_save_folder = obs_save_folder
+    if depth_save_folder:
+        agent.depth_save_folder = depth_save_folder
+    if segment_save_folder:
+        agent.segment_save_folder = segment_save_folder
+    if shorterm_save_folder:
+        agent.shorterm_save_folder = shorterm_save_folder
+    if midterm_save_folder:
+        args.midterm_save_folder = midterm_save_folder
+
+    agent.track_main = graph.track_main
+    agent.track_sub = graph.track_sub
+
+
+def _make_agent_input(args: Any) -> Dict[str, Any]:
+    agent_input = {
+        "bev": None,
+        "pose": None,
+        "midterm_goal": None,
+        "obs": None,
+        "wait": None,
+        "planned_path": None,
+        "bev_step": None,
+    }
+    if getattr(args, "save_episode_video", False):
+        agent_input["_episode_video_frames"] = []
+    return agent_input
+
+
+def _run_initial_scan(agent: Any, args: Any, agent_input: Dict[str, Any]) -> tuple:
+    turn_round = int(360 / args.turn_angle)
+    step = 0
+    for _ in range(turn_round + 1):
+        agent.step_count = step
+        obs, done, infos = agent.control_step(3)
+        agent_input["obs"] = obs
+        step += 1
+    step -= 1
+    return step, turn_round
+
+
+def _run_optional_vlm_reasoning(
+    graph: Any,
+    envs: Any,
+    agent_input: Dict[str, Any],
+    loc_agent: Any,
+    use_vlm_per_stage: bool,
+    log_fn,
+) -> None:
+    if not use_vlm_per_stage or agent_input.get("obs") is None:
+        return
+    try:
+        current_img = agent_input["obs"][-1] if isinstance(agent_input["obs"], list) else agent_input["obs"]
+        if hasattr(current_img, "numpy"):
+            current_img = current_img.cpu().numpy().transpose(1, 2, 0)
+        goal_img = getattr(envs, "instance_imagegoal", None)
+        if goal_img is not None and hasattr(goal_img, "__array__"):
+            goal_img = getattr(goal_img, "__array__", lambda: goal_img)()
+        run_vlm_reasoning(graph, loc_agent, current_img, goal_img)
+    except Exception as exc:
+        log_fn(f"VLM per stage skip: {exc}")
+
+
+def _update_agent_input_for_stage(agent_input: Dict[str, Any], envs: Any, map_inst: Any, nav_mode: str) -> None:
+    agent_input["bev"] = map_inst.bev
+    agent_input["pose"] = apply_transform(envs.get_sim_location(), map_inst.transform_sim2bev)
+    agent_input["bev_step"] = map_inst.bev_step
+    agent_input["_video_nav_mode"] = nav_mode
+
+
+def _plan_explore_path(agent_input: Dict[str, Any], map_inst: Any, midterm_goal: Any, midterm_save_folder: Optional[str], stage: int):
+    goal_pose = midterm_goal["pose"]
+    pose_xy = (int(agent_input["pose"][0]), int(agent_input["pose"][1]))
+    save_path = f"{midterm_save_folder}/stage_{stage}.png" if midterm_save_folder else None
+    safety_field = getattr(map_inst, "stage_space_safety_field", None)
+    planned_path = plan_astar_to_midterm(
+        map_inst.bev, pose_xy, goal_pose, save_path, safety_field=safety_field
+    )
+    agent_input["planned_path"] = planned_path
+    return planned_path
+
+
+def _save_episode_artifacts(envs: Any, agent: Any, agent_input: Dict[str, Any], args: Any, log_fn) -> None:
+    obs_dir = getattr(agent, "obs_save_folder", None)
+    episode_dir = os.path.dirname(obs_dir) if obs_dir is not None else None
+
+    if hasattr(envs, "save_topdown_traj") and episode_dir:
+        try:
+            envs.save_topdown_traj(episode_dir)
+        except Exception as exc:
+            log_fn(f"save_topdown_traj failed: {exc}")
+
+    if getattr(args, "save_episode_video", False) and episode_dir:
+        frames = agent_input.get("_episode_video_frames")
+        if frames:
+            try:
+                video_path = os.path.join(episode_dir, "episode_video.mp4")
+                write_episode_video(frames, video_path, fps=5.0)
+                log_fn(f"Episode video saved: {video_path}")
+            except Exception as exc:
+                log_fn(f"save_episode_video failed: {exc}")
+
+
+def _finalize_metrics(success: bool, final_metrics: Dict[str, float], envs: Any) -> tuple:
+    if not success and final_metrics == zero_nav_metrics() and getattr(envs, "info", None):
+        final_metrics = coerce_nav_metrics(envs.info)
+        success = final_metrics["success"] > 0.0
+    return success, final_metrics
 
 
 def run_episode(
@@ -78,41 +199,19 @@ def run_episode(
             result_file_handle.write(s + "\n")
             result_file_handle.flush()
 
-    if obs_save_folder:
-        agent.obs_save_folder = obs_save_folder
-    if depth_save_folder:
-        agent.depth_save_folder = depth_save_folder
-    if segment_save_folder:
-        agent.segment_save_folder = segment_save_folder
-    if shorterm_save_folder:
-        agent.shorterm_save_folder = shorterm_save_folder
-    if midterm_save_folder:
-        args.midterm_save_folder = midterm_save_folder
+    _configure_episode_outputs(
+        agent,
+        graph,
+        args,
+        obs_save_folder=obs_save_folder,
+        depth_save_folder=depth_save_folder,
+        segment_save_folder=segment_save_folder,
+        midterm_save_folder=midterm_save_folder,
+        shorterm_save_folder=shorterm_save_folder,
+    )
 
-    agent.track_main = graph.track_main
-    agent.track_sub = graph.track_sub
-
-    agent_input = {
-        "bev": None,
-        "pose": None,
-        "midterm_goal": None,
-        "obs": None,
-        "wait": None,
-        "planned_path": None,
-        "bev_step": None,
-    }
-    if getattr(args, "save_episode_video", False):
-        agent_input["_episode_video_frames"] = []
-
-    turn_round = int(360 / args.turn_angle)
-    step = 0
-    # Initial 360° scan
-    for s in range(turn_round + 1):
-        agent.step_count = step
-        obs, done, infos = agent.control_step(3)
-        agent_input["obs"] = obs
-        step += 1
-    step -= 1
+    agent_input = _make_agent_input(args)
+    step, turn_round = _run_initial_scan(agent, args, agent_input)
 
     stage = 0
     set2 = 0
@@ -140,17 +239,7 @@ def run_episode(
         graph.update_stage(map_info)
 
         # ----- 3. (optional) VLM Reasoning -----
-        if use_vlm_per_stage and agent_input.get("obs") is not None:
-            try:
-                current_img = agent_input["obs"][-1] if isinstance(agent_input["obs"], list) else agent_input["obs"]
-                if hasattr(current_img, "numpy"):
-                    current_img = current_img.cpu().numpy().transpose(1, 2, 0)
-                goal_img = getattr(envs, "instance_imagegoal", None)
-                if goal_img is not None and hasattr(goal_img, "__array__"):
-                    goal_img = getattr(goal_img, "__array__", lambda: goal_img)()
-                run_vlm_reasoning(graph, loc_agent, current_img, goal_img)
-            except Exception as e:
-                log(f"VLM per stage skip: {e}")
+        _run_optional_vlm_reasoning(graph, envs, agent_input, loc_agent, use_vlm_per_stage, log)
 
         _log_gssl_snapshot(graph, loc_agent, log)
 
@@ -158,22 +247,12 @@ def run_episode(
         nav_mode, midterm_goal = run_mvm_planning(graph, loc_agent, vis=True)
         stage += 1
 
-        agent_input["bev"] = map_inst.bev
-        agent_input["pose"] = apply_transform(envs.get_sim_location(), map_inst.transform_sim2bev)
-        agent_input["bev_step"] = map_inst.bev_step
-        agent_input["_video_nav_mode"] = nav_mode
+        _update_agent_input_for_stage(agent_input, envs, map_inst, nav_mode)
         log(nav_mode)
 
         # ----- 5. A* path for explore (safety field as costmap to avoid walls) -----
         if nav_mode == "explore" and midterm_goal is not None:
-            goal_pose = midterm_goal["pose"]
-            pose_xy = (int(agent_input["pose"][0]), int(agent_input["pose"][1]))
-            save_path = f"{midterm_save_folder}/stage_{stage}.png" if midterm_save_folder else None
-            safety_field = getattr(map_inst, "stage_space_safety_field", None)
-            planned_path = plan_astar_to_midterm(
-                map_inst.bev, pose_xy, goal_pose, save_path, safety_field=safety_field
-            )
-            agent_input["planned_path"] = planned_path
+            planned_path = _plan_explore_path(agent_input, map_inst, midterm_goal, midterm_save_folder, stage)
 
             # If A* fails (start/goal in obstacle or no path), switch to recognition to rebuild map
             if planned_path is None or len(planned_path) == 0:
@@ -230,34 +309,7 @@ def run_episode(
 
         set2, set1, current_step = set1, current_step, step
 
-    # ----- Episode end: save top-down trajectory -----
-    # envs is InstanceImageGoal_Env with NavMesh-based top-down map and trajectory cache.
-    # Write trajectory to this episode dir (same episode_x as images).
-    obs_dir = getattr(agent, "obs_save_folder", None)
-    episode_dir = None
-    if obs_dir is not None:
-        # obs_dir is like ".../episode_k/saved_images"; parent is episode root
-        import os
-        episode_dir = os.path.dirname(obs_dir)
-
-    if hasattr(envs, "save_topdown_traj") and episode_dir:
-        try:
-            envs.save_topdown_traj(episode_dir)
-        except Exception as e:
-            log(f"save_topdown_traj failed: {e}")
-
-    if getattr(args, "save_episode_video", False) and episode_dir:
-        frames = agent_input.get("_episode_video_frames")
-        if frames:
-            try:
-                video_path = os.path.join(episode_dir, "episode_video.mp4")
-                write_episode_video(frames, video_path, fps=5.0)
-                log(f"Episode video saved: {video_path}")
-            except Exception as e:
-                log(f"save_episode_video failed: {e}")
-
-    if not success and final_metrics == zero_nav_metrics() and getattr(envs, "info", None):
-        final_metrics = coerce_nav_metrics(envs.info)
-        success = final_metrics["success"] > 0.0
+    _save_episode_artifacts(envs, agent, agent_input, args, log)
+    success, final_metrics = _finalize_metrics(success, final_metrics, envs)
 
     return success, step, final_metrics

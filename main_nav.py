@@ -32,6 +32,11 @@ from src.data.nav_datasets import get_spec, verify_dataset
 
 
 DEFAULT_DEVICE_ID = 1
+DATASET_TASK_CONFIGS = {
+    "objectnav_hm3d": "tasks/objectnav_hm3d.yaml",
+    "objectnav_mp3d": "tasks/objectnav_mp3d.yaml",
+    "instance_imagenav_hm3d": "tasks/hm3d.yaml",
+}
 
 
 @contextmanager
@@ -66,22 +71,30 @@ def build_config(cli_args):
 
     merged = dict(config)
     merged.update({k: v for k, v in vars(cli_args).items() if v is not None})
+    apply_dataset_config(cli_args, merged)
+    apply_cli_overrides(cli_args, merged)
 
-    if cli_args.nav_dataset:
-        spec = get_spec(cli_args.nav_dataset)
-        merged["nav_task"] = spec.task
-        merged["nav_dataset_name"] = spec.dataset
+    args = SimpleNamespace(**merged)
+    finalize_runtime_config(args, cli_args)
+    return args
+
+
+def apply_dataset_config(cli_args, merged):
+    if not cli_args.nav_dataset:
         if cli_args.goal_type is None:
-            merged["goal_type"] = "object" if spec.task == "objectnav" else "ins-image"
-        if cli_args.task_config is None:
-            merged["task_config"] = {
-                "objectnav_hm3d": "tasks/objectnav_hm3d.yaml",
-                "objectnav_mp3d": "tasks/objectnav_mp3d.yaml",
-                "instance_imagenav_hm3d": "tasks/hm3d.yaml",
-            }[cli_args.nav_dataset]
-    elif cli_args.goal_type is None:
-        merged["goal_type"] = merged.get("goal_type", "ins-image")
+            merged["goal_type"] = merged.get("goal_type", "ins-image")
+        return
 
+    spec = get_spec(cli_args.nav_dataset)
+    merged["nav_task"] = spec.task
+    merged["nav_dataset_name"] = spec.dataset
+    if cli_args.goal_type is None:
+        merged["goal_type"] = "object" if spec.task == "objectnav" else "ins-image"
+    if cli_args.task_config is None:
+        merged["task_config"] = DATASET_TASK_CONFIGS[cli_args.nav_dataset]
+
+
+def apply_cli_overrides(cli_args, merged):
     if cli_args.split is not None:
         merged["split"] = cli_args.split
     if cli_args.num_episodes is not None:
@@ -92,7 +105,8 @@ def build_config(cli_args):
     if cli_args.task_config is not None:
         merged["task_config"] = cli_args.task_config
 
-    args = SimpleNamespace(**merged)
+
+def finalize_runtime_config(args, cli_args):
     args.is_debugging = sys.gettrace() is not None
     if args.is_debugging:
         args.experiment_id = "debug"
@@ -117,8 +131,6 @@ def build_config(cli_args):
 
     if torch.cuda.is_available():
         torch.cuda.set_device(cli_args.device_id)
-
-    return args
 
 
 def check_dataset(args):
@@ -231,6 +243,46 @@ def run_navigation(args):
     args.step_size = envs.config["simulator"]["forward_step_size"]
     agent = UniGoal_Agent(args, envs, model_info)
 
+    experiment = create_experiment_dirs()
+
+    metric_rows = []
+    for episode_idx in range(args.num_episodes):
+        try:
+            success_this, step_count, episode_metrics, episode_start_time, dirs = run_single_episode(
+                episode_idx,
+                envs,
+                agent,
+                Graph,
+                Map,
+                model_info,
+                args,
+                run_episode,
+                experiment["dir"],
+            )
+            metric_rows.append(episode_metrics)
+            append_experiment_result(
+                experiment["result_path"],
+                episode_idx,
+                success_this,
+                step_count,
+                episode_start_time,
+                episode_metrics,
+            )
+            save_good_episode_if_needed(envs, success_this, dirs["episode"], experiment["good_dir"], episode_idx)
+        except Exception as exc:
+            metric_rows.append(zero_nav_metrics())
+            log_episode_exception(exc, episode_idx, experiment["dir"], experiment["result_path"])
+
+    summary_metrics = summarize_nav_metrics(metric_rows)
+    summary = format_summary_metrics(summary_metrics)
+    print(summary)
+    with open(experiment["result_path"], "a", encoding="utf-8") as exp_f:
+        exp_f.write(summary + "\n")
+    with open("result_nav.txt", "a", encoding="utf-8") as f:
+        f.write(summary + "\n")
+
+
+def create_experiment_dirs():
     current_time = datetime.now().strftime("%Y%m%d-%H-%M")
     experiment_dir = os.path.join("vis_log_nav", current_time)
     good_experiment_dir = os.path.join("vis_log_nav_good", current_time)
@@ -244,77 +296,85 @@ def run_navigation(args):
         result_f.write(f"Experiment start: {current_time}\n")
         result_f.write(f"Episode logs: {experiment_dir}\n")
 
-    success_count = 0
-    metric_rows = []
-    for episode_idx in range(args.num_episodes):
-        episode_start_time = time.time()
-        dirs = make_episode_dirs(experiment_dir, episode_idx)
-        episode_result_path = dirs["episode"] / "result.txt"
+    return {
+        "dir": experiment_dir,
+        "good_dir": good_experiment_dir,
+        "result_path": experiment_result_path,
+    }
 
-        try:
-            args.midterm_save_folder = str(dirs["midterm"])
-            graph = Graph(args=args, model_info=model_info)
-            obs, infos = agent.reset()
-            configure_goal(graph, envs, args)
 
-            with open(episode_result_path, "w", encoding="utf-8") as result_f:
-                result_f.write(f"=== Episode: {episode_idx} ===\n")
-                result_f.write(f"Prep time: {time.time() - episode_start_time:.2f} s\n")
-                nav_start_time = time.time()
-                success_this, step_count, episode_metrics = run_episode(
-                    episode_idx,
-                    envs,
-                    agent,
-                    graph,
-                    Map,
-                    model_info,
-                    args,
-                    use_vlm_per_stage=getattr(args, "use_vlm_per_stage", True),
-                    obs_save_folder=str(dirs["obs"]),
-                    depth_save_folder=str(dirs["depth"]),
-                    segment_save_folder=str(dirs["segment"]),
-                    midterm_save_folder=str(dirs["midterm"]),
-                    shorterm_save_folder=str(dirs["shorterm"]),
-                    result_file_handle=result_f,
-                )
-                result_f.write(f"Nav time: {time.time() - nav_start_time:.2f} s\n")
-                result_f.write(f"Steps this episode: {step_count}\n")
-                result_f.write(
-                    "Metrics this episode: "
-                    f"success={episode_metrics['success']:.3f}, "
-                    f"spl={episode_metrics['spl']:.3f}, "
-                    f"soft_spl={episode_metrics['soft_spl']:.3f}, "
-                    f"distance_to_goal={episode_metrics['distance_to_goal']:.3f}\n"
-                )
-                result_f.write(f"Total time this episode: {time.time() - episode_start_time:.2f} s\n")
+def run_single_episode(
+    episode_idx,
+    envs,
+    agent,
+    GraphClass,
+    MapClass,
+    model_info,
+    args,
+    run_episode_fn,
+    experiment_dir,
+):
+    episode_start_time = time.time()
+    dirs = make_episode_dirs(experiment_dir, episode_idx)
+    episode_result_path = dirs["episode"] / "result.txt"
 
-            success_count += int(bool(success_this))
-            metric_rows.append(episode_metrics)
-            append_experiment_result(
-                experiment_result_path,
-                episode_idx,
-                success_this,
-                step_count,
-                episode_start_time,
-                episode_metrics,
-            )
-            save_good_episode_if_needed(envs, success_this, dirs["episode"], good_experiment_dir, episode_idx)
-        except Exception as exc:
-            metric_rows.append(zero_nav_metrics())
-            log_episode_exception(exc, episode_idx, experiment_dir, experiment_result_path)
+    args.midterm_save_folder = str(dirs["midterm"])
+    graph = GraphClass(args=args, model_info=model_info)
+    agent.reset()
+    configure_goal(graph, envs, args)
 
-    summary_metrics = summarize_nav_metrics(metric_rows)
-    summary = (
-        f"SR: {summary_metrics['sr']:.4f}, "
-        f"SPL: {summary_metrics['spl']:.4f}, "
-        f"SoftSPL: {summary_metrics['soft_spl']:.4f}, "
-        f"DTS: {summary_metrics['distance_to_goal']:.4f}"
+    with open(episode_result_path, "w", encoding="utf-8") as result_f:
+        write_episode_header(result_f, episode_idx, episode_start_time)
+        nav_start_time = time.time()
+        success, step_count, metrics = run_episode_fn(
+            episode_idx,
+            envs,
+            agent,
+            graph,
+            MapClass,
+            model_info,
+            args,
+            use_vlm_per_stage=getattr(args, "use_vlm_per_stage", True),
+            obs_save_folder=str(dirs["obs"]),
+            depth_save_folder=str(dirs["depth"]),
+            segment_save_folder=str(dirs["segment"]),
+            midterm_save_folder=str(dirs["midterm"]),
+            shorterm_save_folder=str(dirs["shorterm"]),
+            result_file_handle=result_f,
+        )
+        write_episode_footer(result_f, nav_start_time, step_count, metrics, episode_start_time)
+
+    return success, step_count, metrics, episode_start_time, dirs
+
+
+def write_episode_header(result_f, episode_idx, episode_start_time):
+    result_f.write(f"=== Episode: {episode_idx} ===\n")
+    result_f.write(f"Prep time: {time.time() - episode_start_time:.2f} s\n")
+
+
+def write_episode_footer(result_f, nav_start_time, step_count, metrics, episode_start_time):
+    result_f.write(f"Nav time: {time.time() - nav_start_time:.2f} s\n")
+    result_f.write(f"Steps this episode: {step_count}\n")
+    result_f.write(f"Metrics this episode: {format_episode_metrics(metrics)}\n")
+    result_f.write(f"Total time this episode: {time.time() - episode_start_time:.2f} s\n")
+
+
+def format_episode_metrics(metrics):
+    return (
+        f"success={metrics['success']:.3f}, "
+        f"spl={metrics['spl']:.3f}, "
+        f"soft_spl={metrics['soft_spl']:.3f}, "
+        f"distance_to_goal={metrics['distance_to_goal']:.3f}"
     )
-    print(summary)
-    with open(experiment_result_path, "a", encoding="utf-8") as exp_f:
-        exp_f.write(summary + "\n")
-    with open("result_nav.txt", "a", encoding="utf-8") as f:
-        f.write(summary + "\n")
+
+
+def format_summary_metrics(metrics):
+    return (
+        f"SR: {metrics['sr']:.4f}, "
+        f"SPL: {metrics['spl']:.4f}, "
+        f"SoftSPL: {metrics['soft_spl']:.4f}, "
+        f"DTS: {metrics['distance_to_goal']:.4f}"
+    )
 
 
 def append_experiment_result(path, episode_idx, success, steps, episode_start_time, metrics):
