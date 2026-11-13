@@ -275,6 +275,32 @@ outputs/
 
 These paths are ignored by git.
 
+## Failure Diagnostics
+
+Each episode writes a buffered `failure_diagnostics.jsonl` containing action
+motion, map quality, navigation decisions, A* results, execution progress and
+verification outcomes. Recording reuses values already produced by navigation;
+it performs no extra inference or image processing. Habitat goal distance is
+sampled only as an offline metric and is never provided to the policy.
+
+At episode and run completion, the entrypoint also writes
+`failure_summary.md` and `failure_summary.json`. Failures are separated into:
+
+- `navigation_chain`: mapping, localization, collision/stall, or planning and
+  execution failures.
+- `exploration_policy`: repeated goals, unproductive directions, or semantic
+  selection/verification loops on otherwise usable navigation stages.
+
+Re-run the analysis without executing an experiment:
+
+```bash
+python scripts/analyze_failure.py vis_log_nav/<timestamp>/episode_0
+python scripts/analyze_failure.py vis_log_nav/<timestamp> --format json
+```
+
+The thresholds and logging interval are configured by the
+`failure_diagnostics_*` fields in `configs/config_habitat.yaml`.
+
 ## Code Structure
 
 Core:

@@ -113,6 +113,7 @@ def run_until_midterm_reached(
     pretrigger_epsilon_bev: Optional[float] = None,
     on_pretrigger: Optional[Callable] = None,
     pretrigger_context: Optional[Dict] = None,
+    on_step: Optional[Callable[[int, Optional[Dict]], None]] = None,
 ) -> tuple:
     """
     Low-level execution loop: follow A* path via FMM short-term goals until gmid reached or step limit.
@@ -173,6 +174,8 @@ def run_until_midterm_reached(
         shorterm_dir = getattr(agent, "shorterm_save_folder", None)
         visualize_shorterm = bool(shorterm_dir) and bool(getattr(args, "save_shortterm_debug", False))
         obs, done, info = agent.step(agent_input, visualize=visualize_shorterm)
+        if on_step is not None:
+            on_step(step, info)
         if getattr(args, "save_episode_video", False) and agent_input.get("_episode_video_frames") is not None:
             record_episode_frame(
                 agent_input=agent_input,
@@ -204,6 +207,7 @@ def execute_finding_or_judgement_turn(
     agent_input: Dict,
     turn_round: int,
     current_step: int,
+    on_step: Optional[Callable[[int, Optional[Dict]], None]] = None,
 ) -> int:
     """
     finding/judgement branch: rotate in place one full turn to collect observations; does not decide success.
@@ -216,6 +220,8 @@ def execute_finding_or_judgement_turn(
     for i in range(turn_round + 1):
         agent.step_count = current_step + 1 + i
         obs, done, infos = agent.control_step(3)
+        if on_step is not None:
+            on_step(agent.step_count, infos)
         agent_input["pose"] = apply_transform(envs.get_sim_location(), map_inst.transform_sim2bev)
         agent_input["obs"] = obs
         if getattr(agent, "args", None) and getattr(agent.args, "save_episode_video", False):

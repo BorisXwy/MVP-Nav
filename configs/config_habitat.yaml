@@ -97,6 +97,22 @@ save_shortterm_debug: false
 save_raw_pcd: false
 vggt_max_frames: 12
 keep_vggt_on_gpu: false
+
+# Low-overhead structured logs for offline failure attribution. These fields
+# are observational only and never participate in navigation decisions.
+failure_diagnostics_enabled: true
+failure_diagnostics_flush_every: 32
+failure_diagnostics_collision_motion_m: 0.02
+failure_diagnostics_repeat_goal_radius_m: 0.75
+failure_diagnostics_distance_interval: 10
+failure_summary_enabled: true
+pose_fit_quality_min_sim_span_m: 0.25
+pose_fit_quality_max_stationary_drift_px: 35.0
+pose_fit_quality_max_mean_error_px: 25.0
+pose_fit_quality_max_max_error_px: 90.0
+pose_fit_quality_min_span_ratio: 0.45
+pose_fit_quality_max_span_ratio: 2.20
+
 # 4. 探索历史场：始终计算并可视化；为 true 时参与融合决策（值越大越未探索），为 false 时传入全 1 不影响目标
 use_exploration_history_field: false
 exploration_history_sigma: 10

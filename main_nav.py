@@ -8,6 +8,7 @@ running so dataset/env smoke tests do not pay the model-loading cost.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -232,6 +233,7 @@ def run_navigation(args):
     from src.map.spacev6 import Map
     from src.pipeline import run_episode
     from src.core.nav_metrics import summarize_nav_metrics, zero_nav_metrics
+    from src.analysis.failure_analysis import write_reports
 
     os.makedirs(args.log_dir, exist_ok=True)
     os.makedirs(args.visualization_dir, exist_ok=True)
@@ -269,6 +271,10 @@ def run_navigation(args):
                 episode_metrics,
             )
             save_good_episode_if_needed(envs, success_this, dirs["episode"], experiment["good_dir"], episode_idx)
+            if bool(getattr(args, "failure_summary_enabled", True)):
+                write_episode_failure_summary(
+                    dirs["episode"], experiment["result_path"], write_reports
+                )
         except Exception as exc:
             metric_rows.append(zero_nav_metrics())
             log_episode_exception(exc, episode_idx, experiment["dir"], experiment["result_path"])
@@ -280,6 +286,8 @@ def run_navigation(args):
         exp_f.write(summary + "\n")
     with open("result_nav.txt", "a", encoding="utf-8") as f:
         f.write(summary + "\n")
+    if bool(getattr(args, "failure_summary_enabled", True)):
+        write_reports(Path(experiment["dir"]), Path(experiment["dir"]))
 
 
 def create_experiment_dirs():
@@ -402,6 +410,29 @@ def save_good_episode_if_needed(envs, success, episode_dir, good_experiment_dir,
         print(f"Failed to save good episode: {exc}")
 
 
+def write_episode_failure_summary(episode_dir, experiment_result_path, writer=None):
+    """Write post-run JSON/Markdown attribution without feeding it to policy."""
+    if writer is None:
+        from src.analysis.failure_analysis import write_reports
+
+        writer = write_reports
+    reports = writer(Path(episode_dir), Path(episode_dir))
+    if not reports:
+        return None
+    report = reports[0]
+    line = (
+        "Failure analysis: "
+        f"bucket={report['bucket']}, subtype={report['subtype']}, "
+        f"confidence={report['confidence']}"
+    )
+    print(line)
+    with open(Path(episode_dir) / "result.txt", "a", encoding="utf-8") as result_f:
+        result_f.write(line + "\n")
+    with open(experiment_result_path, "a", encoding="utf-8") as exp_f:
+        exp_f.write(f"Episode {report.get('episode')} {line}\n")
+    return report
+
+
 def log_episode_exception(exc, episode_idx, experiment_dir, experiment_result_path):
     import traceback
 
@@ -416,6 +447,18 @@ def log_episode_exception(exc, episode_idx, experiment_dir, experiment_result_pa
         exp_f.write(msg + "\n")
     with open("result_nav.txt", "a", encoding="utf-8") as f:
         f.write(msg + "\n")
+    diagnostics_path = episode_dir / "failure_diagnostics.jsonl"
+    if diagnostics_path.exists():
+        row = {
+            "schema_version": 1,
+            "event": "episode_exception",
+            "episode": int(episode_idx),
+            "elapsed_s": None,
+            "error": str(exc),
+        }
+        with open(diagnostics_path, "a", encoding="utf-8") as diagnostics_f:
+            diagnostics_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        write_episode_failure_summary(episode_dir, experiment_result_path)
 
 
 def main():
